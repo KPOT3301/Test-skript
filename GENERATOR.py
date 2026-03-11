@@ -16,7 +16,6 @@ import time
 import json
 import tempfile
 import sys
-import statistics
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
@@ -831,4 +830,6 @@ def create_base64_subscription():
             encoded = base64.b64encode(f.read()).decode('ascii')
         with open(OUTPUT_BASE64_FILE, 'w', encoding='ascii') as f:
             f.write(encoded)
-        logging.info(f"💾 Base64-версия сохранена в {OUTPUT
+        logging.info(f"💾 Base64-версия сохранена в {OUTPUT_BASE64_FILE}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка создания Base64: {
