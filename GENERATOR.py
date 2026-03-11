@@ -4,6 +4,7 @@
 # отсев по latency (TCP) сразу после первого этапа, упрощённый лог.
 # Оптимизация: флаг и город определяются сразу после TCP, реальная проверка только для серверов с флагом
 # Ускорение Xray: 30 потоков, задержка 1с, таймаут 15с, все проверки однократные.
+# Ужесточение: TCP-проверка выполняется 10 раз для каждого сервера
 
 import os
 import re
@@ -15,6 +16,7 @@ import time
 import json
 import tempfile
 import sys
+import statistics
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
@@ -72,7 +74,9 @@ XRAY_CORE_PATH = "xray"
 
 # TCP-проверка
 TCP_CHECK_TIMEOUT = 10
-TCP_MAX_WORKERS = 400
+TCP_MAX_WORKERS = 200  # Уменьшил, чтобы не перегружать сеть при 10 проверках
+TCP_RETRY_COUNT = 10    # Количество повторных TCP-проверок для жесткого отсева
+TCP_SUCCESS_THRESHOLD = 7  # Минимальное количество успешных попыток (70% успеха)
 
 # Реальная проверка
 SOCKS_PORT = 8080
@@ -85,6 +89,7 @@ TEST_URLS = [
 ]
 
 MAX_LATENCY_MS = 300  # максимально допустимая задержка TCP-соединения (мс)
+MAX_LATENCY_JITTER_MS = 100  # максимально допустимый разброс задержки (для стабильности)
 
 # ---------- GEOIP ЗАГРУЗКА (CITY) ----------
 GEOIP_DB_PATH = "GeoLite2-City.mmdb"
@@ -562,23 +567,68 @@ def create_xray_config(config):
     base_config["outbounds"].append(outbound)
     return base_config
 
-# ---------- TCP ПРОВЕРКА (возвращает IP и задержку при успехе) ----------
-def check_tcp(link):
+# ---------- МНОГОКРАТНАЯ TCP ПРОВЕРКА (10 раз с анализом стабильности) ----------
+def check_tcp_multiple(link):
+    """
+    Выполняет TCP-проверку TCP_RETRY_COUNT раз.
+    Возвращает (link, успех, ip, список задержек) если:
+    - количество успешных попыток >= TCP_SUCCESS_THRESHOLD
+    - средняя задержка <= MAX_LATENCY_MS
+    - разброс задержек (max-min) <= MAX_LATENCY_JITTER_MS
+    """
     parsed = parse_link(link)
     if not parsed:
-        return (link, False, None, None)
+        return (link, False, None, [])
+    
     host, port = parsed['host'], parsed['port']
+    
     try:
         ip = resolve_host(host)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(TCP_CHECK_TIMEOUT)
-        start = time.time()
-        result = sock.connect_ex((ip, port))
-        latency_ms = int((time.time() - start) * 1000) if result == 0 else None
-        sock.close()
-        return (link, result == 0, ip if result == 0 else None, latency_ms)
     except:
-        return (link, False, None, None)
+        return (link, False, None, [])
+    
+    latencies = []
+    success_count = 0
+    
+    for attempt in range(TCP_RETRY_COUNT):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(TCP_CHECK_TIMEOUT)
+            start = time.time()
+            result = sock.connect_ex((ip, port))
+            latency_ms = int((time.time() - start) * 1000) if result == 0 else None
+            sock.close()
+            
+            if result == 0 and latency_ms is not None:
+                success_count += 1
+                latencies.append(latency_ms)
+            else:
+                # Добавляем None для неудачных попыток (для статистики)
+                latencies.append(None)
+        except:
+            latencies.append(None)
+    
+    # Фильтруем только успешные замеры для анализа
+    successful_latencies = [l for l in latencies if l is not None]
+    
+    # Критерии отбора:
+    # 1. Достаточно успешных попыток
+    if success_count < TCP_SUCCESS_THRESHOLD:
+        return (link, False, ip, latencies)
+    
+    # 2. Средняя задержка в пределах нормы
+    avg_latency = sum(successful_latencies) / len(successful_latencies)
+    if avg_latency > MAX_LATENCY_MS:
+        return (link, False, ip, latencies)
+    
+    # 3. Стабильность соединения (разброс задержек)
+    if len(successful_latencies) > 1:
+        latency_jitter = max(successful_latencies) - min(successful_latencies)
+        if latency_jitter > MAX_LATENCY_JITTER_MS:
+            return (link, False, ip, latencies)
+    
+    # Все проверки пройдены
+    return (link, True, ip, latencies)
 
 # ---------- РЕАЛЬНАЯ ПРОВЕРКА (однократная, без повторов) ----------
 def check_real(link):
@@ -659,36 +709,46 @@ def check_real(link):
         if os.path.exists(config_path):
             os.unlink(config_path)
 
-# ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ С ОТСЕВОМ ПО TCP-ЗАДЕРЖКЕ ----------
+# ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ С МНОГОКРАТНОЙ TCP-ПРОВЕРКОЙ ----------
 def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
     logging.info(f"🚀 Начинаю двухуровневую проверку {total_checks} ссылок")
+    logging.info(f"📊 Параметры TCP-проверки: {TCP_RETRY_COUNT} попыток, успешных >= {TCP_SUCCESS_THRESHOLD}, latency <= {MAX_LATENCY_MS}мс, jitter <= {MAX_LATENCY_JITTER_MS}мс")
 
-    # Этап 1: TCP-проверка + замер задержки
-    logging.info(f"🌐 Этап 1: TCP-проверка {total_checks} ссылок...")
-    tcp_success = []  # (link, ip, latency_ms)
+    # Этап 1: Многократная TCP-проверка + анализ стабильности
+    logging.info(f"🌐 Этап 1: Многократная TCP-проверка ({TCP_RETRY_COUNT} раз) {total_checks} ссылок...")
+    tcp_success = []  # (link, ip, latencies)
+    
     with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
-        future_to_link = {executor.submit(check_tcp, link): link for link in links}
+        future_to_link = {executor.submit(check_tcp_multiple, link): link for link in links}
         for future in as_completed(future_to_link):
             current_check += 1
-            link, ok, ip, latency = future.result()
-            if ok and ip and latency is not None:
-                # Отсев по задержке
-                if latency <= MAX_LATENCY_MS:
-                    tcp_success.append((link, ip, latency))
-    logging.info(f"📊 TCP-проверка завершена. Прошли (latency <= {MAX_LATENCY_MS} мс): {len(tcp_success)}/{total_checks}")
+            link, ok, ip, latencies = future.result()
+            
+            # Подсчет успешных для лога
+            successful_attempts = len([l for l in latencies if l is not None])
+            success_rate = (successful_attempts / TCP_RETRY_COUNT) * 100
+            
+            if ok and ip:
+                avg_latency = sum([l for l in latencies if l is not None]) / successful_attempts
+                tcp_success.append((link, ip, latencies))
+                logging.debug(f"✅ TCP прошел: {shorten_link(link)} | Успешно: {successful_attempts}/{TCP_RETRY_COUNT} ({success_rate:.0f}%) | Ср.задержка: {avg_latency:.0f}мс")
+            else:
+                logging.debug(f"❌ TCP не прошел: {shorten_link(link)} | Успешно: {successful_attempts}/{TCP_RETRY_COUNT} ({success_rate:.0f}%)")
+
+    logging.info(f"📊 TCP-проверка завершена. Прошли жесткий отбор: {len(tcp_success)}/{total_checks}")
 
     if not tcp_success:
         return []
 
     # Определяем флаги и города для прошедших TCP
     logging.info(f"🌍 Определение геоданных для {len(tcp_success)} серверов...")
-    geo_by_link = {}  # link -> (flag, city)
-    for link, ip, _ in tcp_success:
+    geo_by_link = {}  # link -> (flag, city, latencies)
+    for link, ip, latencies in tcp_success:
         flag, city = get_geo_info(ip) if ip else ("", "")
         if flag:
-            geo_by_link[link] = (flag, city)
+            geo_by_link[link] = (flag, city, latencies)
 
     logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
 
@@ -726,7 +786,9 @@ def filter_working_links(links):
             else:
                 proto = '?'
 
-            flag, city = geo_by_link[link]
+            flag, city, latencies = geo_by_link[link]
+            successful_attempts = len([l for l in latencies if l is not None])
+            avg_latency = sum([l for l in latencies if l is not None]) / successful_attempts
 
             if is_working:
                 working_links_with_geo.append((link, flag, city))
@@ -734,7 +796,7 @@ def filter_working_links(links):
             else:
                 emoji = "❌"
 
-            log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short}"
+            log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short} | {flag} | {avg_latency:.0f}мс ({successful_attempts}/{TCP_RETRY_COUNT})"
             logging.info(log_msg)
 
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
@@ -769,57 +831,4 @@ def create_base64_subscription():
             encoded = base64.b64encode(f.read()).decode('ascii')
         with open(OUTPUT_BASE64_FILE, 'w', encoding='ascii') as f:
             f.write(encoded)
-        logging.info(f"💾 Base64-версия сохранена в {OUTPUT_BASE64_FILE}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка создания Base64: {e}")
-
-def check_xray_available():
-    logging.info("🔍 Проверка Xray-core...")
-    try:
-        result = subprocess.run([XRAY_CORE_PATH, '--version'], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            logging.info(f"✅ Xray-core: {result.stdout.splitlines()[0]}")
-            return True
-        else:
-            logging.warning("⚠️ Xray-core не отвечает")
-            return False
-    except FileNotFoundError:
-        logging.error(f"❌ Xray-core не найден по пути '{XRAY_CORE_PATH}'")
-        return False
-    except Exception as e:
-        logging.error(f"❌ Ошибка проверки Xray: {e}")
-        return False
-
-# ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
-def main():
-    global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, Xray=15с, отсев по TCP latency >500 мс, все проверки однократные)")
-    if not check_xray_available():
-        logging.error("Xray-core обязателен. Завершение.")
-        return
-
-    sources = read_sources()
-    if not sources:
-        return
-
-    all_links = gather_all_links(sources)
-    if not all_links:
-        return
-
-    record_counter = 0
-    current_check = 0
-    total_checks = len(all_links)
-
-    working_links_with_geo = filter_working_links(all_links)
-    written = save_working_links(working_links_with_geo)
-
-    if written > 0:
-        create_base64_subscription()
-    else:
-        logging.warning("Нет серверов с флагами – Base64 не создана.")
-
-    logging.info(f"📊 Итог: {len(working_links_with_geo)} рабочих с флагами из {len(all_links)} проверенных")
-    logging.info("🏁 Работа завершена")
-
-if __name__ == "__main__":
-    main()
+        logging.info(f"💾 Base64-версия сохранена в {OUTPUT
