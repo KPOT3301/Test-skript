@@ -228,9 +228,378 @@ def gather_all_links(sources):
     logging.info(f"🎯 Всего уникальных ссылок: {len(all_links)}")
     return list(all_links)
 
-# ---------- ПАРСЕРЫ (без изменений, оставлены как были) ----------
-# ... (весь код парсеров идентичен предыдущей версии, я пропущу его для краткости)
-# В реальном ответе нужно вставить полный код парсеров из предыдущей версии, но здесь я сокращу.
+# ---------- ПАРСЕРЫ ----------
+def parse_vless_link(link):
+    try:
+        without_proto = link[8:]
+        at_index = without_proto.find('@')
+        if at_index == -1:
+            return None
+        uuid = without_proto[:at_index]
+        rest = without_proto[at_index+1:]
+        parsed = urlparse(f"tcp://{rest}")
+        host = parsed.hostname
+        port = parsed.port or 443
+        params = parse_qs(parsed.query)
+        security = params.get('security', ['none'])[0]
+        if security == 'tsl':
+            security = 'tls'
+        explicit_sni = params.get('sni', [None])[0]
+        return {
+            'protocol': 'vless',
+            'uuid': uuid,
+            'host': host,
+            'port': port,
+            'security': security,
+            'encryption': params.get('encryption', ['none'])[0],
+            'type': params.get('type', ['tcp'])[0],
+            'sni': explicit_sni if explicit_sni else host,
+            'explicit_sni': explicit_sni,
+            'fp': params.get('fp', ['chrome'])[0],
+            'pbk': params.get('pbk', [''])[0],
+            'sid': params.get('sid', [''])[0],
+            'spx': params.get('spx', ['/'])[0],
+            'flow': params.get('flow', [''])[0],
+            'path': params.get('path', ['/'])[0],
+            'host_header': params.get('host', [host])[0]
+        }
+    except Exception as e:
+        logging.debug(f"Ошибка парсинга Vless: {e}")
+        return None
+
+def parse_ss_link(link):
+    try:
+        rest = link[5:]
+        if '#' in rest:
+            rest, _ = rest.split('#', 1)
+        if '?' in rest:
+            rest, _ = rest.split('?', 1)
+        if '@' in rest:
+            userinfo, hostport = rest.split('@', 1)
+            if ':' in userinfo:
+                method, password = userinfo.split(':', 1)
+            else:
+                return None
+        else:
+            try:
+                decoded = base64.b64decode(rest).decode('utf-8')
+                if '@' in decoded:
+                    userinfo, hostport = decoded.split('@', 1)
+                    if ':' in userinfo:
+                        method, password = userinfo.split(':', 1)
+                    else:
+                        return None
+                else:
+                    return None
+            except:
+                return None
+        if ':' in hostport:
+            host, port_str = hostport.rsplit(':', 1)
+            port = int(port_str)
+        else:
+            port = 443
+        return {
+            'protocol': 'ss',
+            'host': host,
+            'port': port,
+            'method': method,
+            'password': password,
+            'original': link,
+            'explicit_sni': None
+        }
+    except Exception as e:
+        logging.debug(f"Ошибка парсинга SS: {e}")
+        return None
+
+def parse_trojan_link(link):
+    try:
+        parsed = urlparse(link)
+        if parsed.scheme != 'trojan':
+            return None
+        password = parsed.username
+        if not password:
+            return None
+        host = parsed.hostname
+        port = parsed.port or 443
+        params = parse_qs(parsed.query)
+        peer_param = params.get('peer')
+        sni_param = params.get('sni')
+        explicit_sni = None
+        if peer_param:
+            explicit_sni = peer_param[0]
+        elif sni_param:
+            explicit_sni = sni_param[0]
+        sni = explicit_sni if explicit_sni else host
+        allow_insecure = params.get('allowInsecure', ['0'])[0].lower() in ('1', 'true', 'yes')
+        network = params.get('type', ['tcp'])[0]
+        security = params.get('security', ['tls'])[0]
+        return {
+            'protocol': 'trojan',
+            'host': host,
+            'port': port,
+            'password': password,
+            'sni': sni,
+            'explicit_sni': explicit_sni,
+            'allow_insecure': allow_insecure,
+            'network': network,
+            'security': security,
+            'original': link
+        }
+    except Exception as e:
+        logging.debug(f"Ошибка парсинга Trojan: {e}")
+        return None
+
+def parse_vmess_link(link):
+    try:
+        b64_part = link[8:]  # после vmess://
+        if '#' in b64_part:
+            b64_part = b64_part.split('#')[0]
+        decoded = base64.b64decode(b64_part).decode('utf-8')
+        cfg = json.loads(decoded)
+        host = cfg.get('add')
+        if not host:
+            return None
+        port = int(cfg.get('port', 443))
+        uuid = cfg.get('id')
+        if not uuid:
+            return None
+        security = cfg.get('scy', 'auto')
+        network = cfg.get('net', 'tcp')
+        path = cfg.get('path', '/')
+        host_header = cfg.get('host', host)
+        tls = cfg.get('tls') == 'tls'
+        sni = cfg.get('peer') or host_header or host
+        return {
+            'protocol': 'vmess',
+            'host': host,
+            'port': port,
+            'uuid': uuid,
+            'security': security,
+            'type': network,
+            'path': path,
+            'host_header': host_header,
+            'tls': tls,
+            'sni': sni,
+            'explicit_sni': cfg.get('peer'),
+            'allow_insecure': cfg.get('allowInsecure', False)
+        }
+    except Exception as e:
+        logging.debug(f"Ошибка парсинга VMess: {e}")
+        return None
+
+def parse_hysteria2_link(link):
+    try:
+        if link.startswith('hysteria2://'):
+            rest = link[12:]
+        elif link.startswith('hy2://'):
+            rest = link[6:]
+        else:
+            return None
+
+        userinfo = None
+        hostport = rest
+        if '@' in rest:
+            userinfo, hostport = rest.split('@', 1)
+
+        password = None
+        if userinfo:
+            password = userinfo
+
+        parsed = urlparse(f"//{hostport}")
+        host = parsed.hostname
+        port = parsed.port or 443
+        params = parse_qs(parsed.query)
+
+        insecure = params.get('insecure', ['0'])[0].lower() in ('1', 'true', 'yes')
+        sni = params.get('sni', [host])[0]
+        up = params.get('up', [''])[0]
+        down = params.get('down', [''])[0]
+        obfs = params.get('obfs', [''])[0]
+
+        return {
+            'protocol': 'hysteria2',
+            'host': host,
+            'port': port,
+            'password': password,
+            'sni': sni,
+            'explicit_sni': sni if sni != host else None,
+            'allow_insecure': insecure,
+            'up': up,
+            'down': down,
+            'obfs': obfs
+        }
+    except Exception as e:
+        logging.debug(f"Ошибка парсинга Hysteria2: {e}")
+        return None
+
+def parse_link(link):
+    if link.startswith('vless://'):
+        return parse_vless_link(link)
+    elif link.startswith('ss://'):
+        return parse_ss_link(link)
+    elif link.startswith('trojan://'):
+        return parse_trojan_link(link)
+    elif link.startswith('vmess://'):
+        return parse_vmess_link(link)
+    elif link.startswith(('hysteria2://', 'hy2://')):
+        return parse_hysteria2_link(link)
+    else:
+        return None
+
+def shorten_link(link):
+    """Возвращает сокращённое представление ссылки: протокол://хост:порт"""
+    parsed = parse_link(link)
+    if parsed:
+        return f"{parsed['protocol']}://{parsed['host']}:{parsed['port']}"
+    q_pos = link.find('?')
+    if q_pos != -1:
+        return link[:q_pos]
+    return link[:80]
+
+# ---------- СОЗДАНИЕ КОНФИГА XRAY (с динамическим портом) ----------
+def create_xray_config(config, socks_port):
+    base_config = {
+        "log": {"loglevel": "error"},
+        "inbounds": [{
+            "port": socks_port,
+            "listen": "127.0.0.1",
+            "protocol": "socks",
+            "settings": {"auth": "noauth", "udp": True, "ip": "127.0.0.1"}
+        }],
+        "outbounds": []
+    }
+    protocol = config['protocol']
+
+    if protocol == 'vless':
+        outbound = {
+            "protocol": "vless",
+            "settings": {
+                "vnext": [{
+                    "address": config['host'],
+                    "port": config['port'],
+                    "users": [{
+                        "id": config['uuid'],
+                        "encryption": config.get('encryption', 'none'),
+                        "flow": config.get('flow', '')
+                    }]
+                }]
+            },
+            "streamSettings": {
+                "network": config.get('type', 'tcp'),
+                "security": config.get('security', 'none')
+            }
+        }
+        if config['security'] == 'tls':
+            outbound["streamSettings"]["tlsSettings"] = {
+                "serverName": config.get('sni', config['host']),
+                "fingerprint": config.get('fp', 'chrome'),
+                "allowInsecure": False
+            }
+        elif config['security'] == 'reality':
+            outbound["streamSettings"]["realitySettings"] = {
+                "serverName": config.get('sni', config['host']),
+                "fingerprint": config.get('fp', 'random'),
+                "publicKey": config.get('pbk', ''),
+                "shortId": config.get('sid', ''),
+                "spiderX": config.get('spx', '/')
+            }
+        if config.get('type') == 'ws':
+            outbound["streamSettings"]["wsSettings"] = {
+                "path": config.get('path', '/'),
+                "headers": {"Host": config.get('host_header', config['host'])}
+            }
+
+    elif protocol == 'vmess':
+        outbound = {
+            "protocol": "vmess",
+            "settings": {
+                "vnext": [{
+                    "address": config['host'],
+                    "port": config['port'],
+                    "users": [{
+                        "id": config['uuid'],
+                        "security": config.get('security', 'auto')
+                    }]
+                }]
+            },
+            "streamSettings": {
+                "network": config.get('type', 'tcp'),
+                "security": config.get('tls', False) and "tls" or "none"
+            }
+        }
+        if config.get('tls'):
+            outbound["streamSettings"]["tlsSettings"] = {
+                "serverName": config.get('sni', config['host']),
+                "allowInsecure": config.get('allow_insecure', False)
+            }
+        if config.get('type') == 'ws':
+            outbound["streamSettings"]["wsSettings"] = {
+                "path": config.get('path', '/'),
+                "headers": {"Host": config.get('host_header', config['host'])}
+            }
+
+    elif protocol == 'ss':
+        outbound = {
+            "protocol": "shadowsocks",
+            "settings": {
+                "servers": [{
+                    "address": config['host'],
+                    "port": config['port'],
+                    "method": config['method'],
+                    "password": config['password']
+                }]
+            },
+            "streamSettings": {"network": "tcp", "security": "none"}
+        }
+
+    elif protocol == 'trojan':
+        outbound = {
+            "protocol": "trojan",
+            "settings": {
+                "servers": [{
+                    "address": config['host'],
+                    "port": config['port'],
+                    "password": config['password']
+                }]
+            },
+            "streamSettings": {
+                "network": config.get('network', 'tcp'),
+                "security": config.get('security', 'tls')
+            }
+        }
+        if config.get('security') == 'tls':
+            outbound["streamSettings"]["tlsSettings"] = {
+                "serverName": config.get('sni', config['host']),
+                "allowInsecure": config.get('allow_insecure', False)
+            }
+
+    elif protocol == 'hysteria2':
+        outbound = {
+            "protocol": "hysteria2",
+            "settings": {
+                "server": config['host'],
+                "port": config['port'],
+                "password": config['password'],
+                "tls": {
+                    "sni": config.get('sni', config['host']),
+                    "insecure": config.get('allow_insecure', False)
+                }
+            }
+        }
+        if config.get('up') or config.get('down'):
+            outbound["settings"]["bandwidth"] = {}
+            if config.get('up'):
+                outbound["settings"]["bandwidth"]["up"] = config['up']
+            if config.get('down'):
+                outbound["settings"]["bandwidth"]["down"] = config['down']
+        if config.get('obfs'):
+            outbound["settings"]["obfs"] = config['obfs']
+
+    else:
+        return None
+
+    base_config["outbounds"].append(outbound)
+    return base_config
 
 # ---------- TCP ПРОВЕРКА (3 попытки) ----------
 def check_tcp(link):
@@ -346,7 +715,7 @@ def check_real(link):
                 start = time.time()
                 resp = requests.get(
                     DOH_URL, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                    headers={**USER_AGENT, **DOH_HEADERS}, verify=False
+                    headers={'User-Agent': USER_AGENT, **DOH_HEADERS}, verify=False
                 )
                 latency = int((time.time() - start) * 1000)
                 data = resp.json()
@@ -364,16 +733,13 @@ def check_real(link):
             return True, http_latency
 
         # Выполняем несколько попыток
-        latencies = []
         for attempt in range(REAL_CHECK_ATTEMPTS):
-            ok, lat = single_check()
+            ok, _ = single_check()
             if not ok:
                 return (link, False)
-            latencies.append(lat)
             time.sleep(0.5)  # небольшая пауза между попытками
 
-        # Если все попытки успешны, возвращаем успех и минимальную задержку
-        # (для сортировки используем TCP-задержку, но можем и эту)
+        # Все попытки успешны
         return (link, True)
 
     except Exception as e:
