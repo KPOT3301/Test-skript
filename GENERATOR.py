@@ -5,6 +5,7 @@
 # Оптимизация: флаг и город определяются сразу после TCP, реальная проверка только для серверов с флагом
 # Ускорение Xray: 30 потоков, задержка 1с, таймаут 15с, все проверки однократные.
 # Ужесточение: TCP-проверка выполняется 10 раз для каждого сервера
+# Добавлены логи прогресса (каждые ~10%) для наглядности отсева
 
 import os
 import re
@@ -73,9 +74,9 @@ XRAY_CORE_PATH = "xray"
 
 # TCP-проверка
 TCP_CHECK_TIMEOUT = 10
-TCP_MAX_WORKERS = 200  # Уменьшил, чтобы не перегружать сеть при 10 проверках
-TCP_RETRY_COUNT = 10    # Количество повторных TCP-проверок для жесткого отсева
-TCP_SUCCESS_THRESHOLD = 7  # Минимальное количество успешных попыток (70% успеха)
+TCP_MAX_WORKERS = 200
+TCP_RETRY_COUNT = 10
+TCP_SUCCESS_THRESHOLD = 7
 
 # Реальная проверка
 SOCKS_PORT = 8080
@@ -87,8 +88,8 @@ TEST_URLS = [
     "http://connectivitycheck.gstatic.com/generate_204"
 ]
 
-MAX_LATENCY_MS = 300  # максимально допустимая задержка TCP-соединения (мс)
-MAX_LATENCY_JITTER_MS = 100  # максимально допустимый разброс задержки (для стабильности)
+MAX_LATENCY_MS = 300
+MAX_LATENCY_JITTER_MS = 100
 
 # ---------- GEOIP ЗАГРУЗКА (CITY) ----------
 GEOIP_DB_PATH = "GeoLite2-City.mmdb"
@@ -162,7 +163,6 @@ def fetch_content(url):
         return None
 
 def extract_links_from_text(text):
-    # Добавлены vmess и hysteria2/hy2
     return re.findall(r'(?:vless|ss|trojan|vmess|hysteria2|hy2)://[^\s<>"\']+', text)
 
 def decode_base64_content(encoded):
@@ -602,31 +602,24 @@ def check_tcp_multiple(link):
                 success_count += 1
                 latencies.append(latency_ms)
             else:
-                # Добавляем None для неудачных попыток (для статистики)
                 latencies.append(None)
         except:
             latencies.append(None)
     
-    # Фильтруем только успешные замеры для анализа
     successful_latencies = [l for l in latencies if l is not None]
     
-    # Критерии отбора:
-    # 1. Достаточно успешных попыток
     if success_count < TCP_SUCCESS_THRESHOLD:
         return (link, False, ip, latencies)
     
-    # 2. Средняя задержка в пределах нормы
     avg_latency = sum(successful_latencies) / len(successful_latencies)
     if avg_latency > MAX_LATENCY_MS:
         return (link, False, ip, latencies)
     
-    # 3. Стабильность соединения (разброс задержек)
     if len(successful_latencies) > 1:
         latency_jitter = max(successful_latencies) - min(successful_latencies)
         if latency_jitter > MAX_LATENCY_JITTER_MS:
             return (link, False, ip, latencies)
     
-    # Все проверки пройдены
     return (link, True, ip, latencies)
 
 # ---------- РЕАЛЬНАЯ ПРОВЕРКА (однократная, без повторов) ----------
@@ -654,7 +647,6 @@ def check_real(link):
             'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
         }
 
-        # Определяем, нужно ли проверять HTTPS (для TLS-ключей)
         needs_https = False
         if config_dict['protocol'] in ('vless', 'vmess', 'trojan', 'hysteria2'):
             if config_dict['protocol'] == 'vmess':
@@ -666,7 +658,6 @@ def check_real(link):
                 if security in ('tls', 'reality'):
                     needs_https = True
 
-        # Однократная HTTP-проверка (перебираем тестовые URL, пока один не сработает)
         http_success = False
         for test_url in TEST_URLS:
             try:
@@ -682,17 +673,14 @@ def check_real(link):
         if not http_success:
             return (link, False)
 
-        # Однократная дополнительная проверка HTTPS (если нужна)
         if needs_https:
             try:
                 https_test = "https://www.google.com/generate_204"
                 requests.get(https_test, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
                              headers={'User-Agent': USER_AGENT}, verify=False)
-                # если дошли до сюда – успех
             except Exception:
                 return (link, False)
 
-        # Все проверки пройдены
         return (link, True)
 
     except Exception as e:
@@ -708,40 +696,47 @@ def check_real(link):
         if os.path.exists(config_path):
             os.unlink(config_path)
 
-# ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ С МНОГОКРАТНОЙ TCP-ПРОВЕРКОЙ ----------
+# ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ С МНОГОКРАТНОЙ TCP-ПРОВЕРКОЙ И ЛОГАМИ ПРОГРЕССА ----------
 def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
     logging.info(f"🚀 Начинаю двухуровневую проверку {total_checks} ссылок")
     logging.info(f"📊 Параметры TCP-проверки: {TCP_RETRY_COUNT} попыток, успешных >= {TCP_SUCCESS_THRESHOLD}, latency <= {MAX_LATENCY_MS}мс, jitter <= {MAX_LATENCY_JITTER_MS}мс")
 
-    # Этап 1: Многократная TCP-проверка + анализ стабильности
+    # ---------- Этап 1: Многократная TCP-проверка ----------
     logging.info(f"🌐 Этап 1: Многократная TCP-проверка ({TCP_RETRY_COUNT} раз) {total_checks} ссылок...")
-    tcp_success = []  # (link, ip, latencies)
-    
+    tcp_success = []          # (link, ip, latencies)
+    tcp_passed_count = 0
+    tcp_step = max(1, total_checks // 10)   # логируем каждые ~10% обработанных ссылок
+
     with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
         future_to_link = {executor.submit(check_tcp_multiple, link): link for link in links}
         for future in as_completed(future_to_link):
             current_check += 1
             link, ok, ip, latencies = future.result()
-            
-            # Подсчет успешных для лога
+
             successful_attempts = len([l for l in latencies if l is not None])
             success_rate = (successful_attempts / TCP_RETRY_COUNT) * 100
-            
+
             if ok and ip:
+                tcp_passed_count += 1
                 avg_latency = sum([l for l in latencies if l is not None]) / successful_attempts
                 tcp_success.append((link, ip, latencies))
                 logging.debug(f"✅ TCP прошел: {shorten_link(link)} | Успешно: {successful_attempts}/{TCP_RETRY_COUNT} ({success_rate:.0f}%) | Ср.задержка: {avg_latency:.0f}мс")
             else:
                 logging.debug(f"❌ TCP не прошел: {shorten_link(link)} | Успешно: {successful_attempts}/{TCP_RETRY_COUNT} ({success_rate:.0f}%)")
 
-    logging.info(f"📊 TCP-проверка завершена. Прошли жесткий отбор: {len(tcp_success)}/{total_checks}")
+            # Промежуточный лог прогресса TCP
+            if current_check % tcp_step == 0:
+                percent = (current_check / total_checks) * 100
+                logging.info(f"🔄 TCP прогресс: обработано {current_check}/{total_checks} ({percent:.1f}%), прошло {tcp_passed_count}")
+
+    logging.info(f"📊 TCP-проверка завершена. Прошли жесткий отбор: {len(tcp_success)}/{total_checks} ({len(tcp_success)/total_checks*100:.1f}%)")
 
     if not tcp_success:
         return []
 
-    # Определяем флаги и города для прошедших TCP
+    # ---------- Определение геоданных ----------
     logging.info(f"🌍 Определение геоданных для {len(tcp_success)} серверов...")
     geo_by_link = {}  # link -> (flag, city, latencies)
     for link, ip, latencies in tcp_success:
@@ -749,16 +744,18 @@ def filter_working_links(links):
         if flag:
             geo_by_link[link] = (flag, city, latencies)
 
-    logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
+    logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)} ({len(geo_by_link)/len(tcp_success)*100:.1f}% от прошедших TCP)")
 
     if not geo_by_link:
         return []
 
-    # Этап 2: реальная проверка только для серверов с флагами
+    # ---------- Этап 2: реальная проверка ----------
     logging.info(f"🧪 Этап 2: Реальная проверка {len(geo_by_link)} ссылок...")
     working_links_with_geo = []  # (link, flag, city)
     stage_total = len(geo_by_link)
     stage_current = 0
+    stage_passed = 0
+    stage_step = max(1, stage_total // 10)   # логируем каждые ~10%
 
     links_to_check = list(geo_by_link.keys())
 
@@ -771,7 +768,6 @@ def filter_working_links(links):
             link, is_working = future.result()
             short = shorten_link(link)
 
-            # Определяем протокол
             if link.startswith('vless://'):
                 proto = 'vless'
             elif link.startswith('ss://'):
@@ -791,6 +787,7 @@ def filter_working_links(links):
 
             if is_working:
                 working_links_with_geo.append((link, flag, city))
+                stage_passed += 1
                 emoji = "✅"
             else:
                 emoji = "❌"
@@ -798,10 +795,15 @@ def filter_working_links(links):
             log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short} | {flag} | {avg_latency:.0f}мс ({successful_attempts}/{TCP_RETRY_COUNT})"
             logging.info(log_msg)
 
-    logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
+            # Промежуточный лог прогресса реальной проверки
+            if stage_current % stage_step == 0:
+                percent = (stage_current / stage_total) * 100
+                logging.info(f"🔄 REAL прогресс: проверено {stage_current}/{stage_total} ({percent:.1f}%), рабочих {stage_passed}")
+
+    logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total} ({len(working_links_with_geo)/stage_total*100:.1f}%)")
     return working_links_with_geo
 
-# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ (С ФЛАГАМИ И ГОРОДАМИ) ----------
+# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ----------
 def save_working_links(links_with_geo):
     logging.info(f"💾 Сохраняю {len(links_with_geo)} серверов с геоданными...")
     if not links_with_geo:
