@@ -78,9 +78,6 @@ https://raw.githubusercontent.com/Niyakwi/Vpn-config.txt/main/VPN.txt
 # черные списки
 https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS+All_RUS.txt
 
-# openray
-https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/1.txt
-
 # LimeVPNPaser
 https://raw.githubusercontent.com/LimeHi/LimeVPNGenerator/main/Keys.txt?v=1
 
@@ -98,9 +95,6 @@ https://ghostbin.axel.org/paste/3v63q/raw
 
 # 🐈‍⬛ VPN cat
 https://raw.githubusercontent.com/VPN-cat/VPN/refs/heads/main/configs/VPN-cat-top-100
-
-# openray
-https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/1.txt
 
 # LimeVPNPaser
 https://raw.githubusercontent.com/LimeHi/LimeVPNGenerator/main/Keys.txt?v=1
