@@ -48,13 +48,15 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # geoip2 должен быть в requirements.txt, иначе добавьте его туда
+          # geoip2 должен быть в requirements.txt
 
       - name: Download Xray-core (if not cached)
         if: steps.cache-xray.outputs.cache-hit != 'true'
         run: |
+          # Удаляем старую папку, если она есть (например, от предыдущего запуска без кэша)
+          rm -rf xray-core
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip -q Xray-linux-64.zip -d xray-core
+          unzip -q -o Xray-linux-64.zip -d xray-core
           chmod +x xray-core/xray
           rm -f Xray-linux-64.zip
 
