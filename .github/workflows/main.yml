@@ -39,6 +39,9 @@ jobs:
           chmod +x xray-core/xray
           echo "$(pwd)/xray-core" >> $GITHUB_PATH
 
+      - name: Pull latest changes
+        run: git pull --rebase origin main
+
       - name: Run GENERATOR.py
         run: python GENERATOR.py
 
@@ -46,13 +49,10 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          # Добавляем файлы подписок (российские и остальные)
           git add subscription_RUS.txt subscription_RUS_base64.txt subscription_OTHER.txt subscription_OTHER_base64.txt
-          # Проверяем, есть ли изменения для коммита
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
             git commit -m "Auto-update subscription files"
-            git pull --rebase origin main
             git push
           fi
