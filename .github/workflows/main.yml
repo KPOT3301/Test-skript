@@ -1,0 +1,49 @@
+name: Check Vless Servers
+
+on:
+  schedule:
+    - cron: '0 19 * * *'   # 19:00 UTC = 00:00 Оренбург (UTC+5)
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # нужна полная история для корректного pull/rebase
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install geoip2
+
+      - name: Download Xray-core
+        run: |
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -q Xray-linux-64.zip -d xray-core
+          chmod +x xray-core/xray
+          echo "$(pwd)/xray-core" >> $GITHUB_PATH
+
+      - name: Run GENERATOR.py
+        run: python GENERATOR.py
+
+      - name: Commit and push if changed
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add subscription.txt subscription_base64.txt
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Auto-update subscription files"
+            git pull --rebase origin main
+            git push
+          fi
+          
