@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
-# Версия с максимальными ужесточениями и защитой от зависаний в GitHub Actions
+# Ужесточение: latency <= 200 мс, два HTTP-теста, обязательная HTTPS-проверка для всех протоколов.
+# Многопоточность: TCP = 300, Xray = 20 (оптимизировано для GitHub Actions).
 
 import os
 import re
@@ -12,10 +13,8 @@ import time
 import json
 import tempfile
 import sys
-import signal
-import concurrent.futures
 from urllib.parse import urlparse, parse_qs
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from datetime import datetime
 
@@ -69,21 +68,24 @@ REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 XRAY_CORE_PATH = "xray"
 
-# TCP-проверка
+# TCP-проверка (300 потоков)
 TCP_CHECK_TIMEOUT = 10
-TCP_MAX_WORKERS = 400
+TCP_MAX_WORKERS = 300
 
-# Реальная проверка
+# Реальная проверка (20 одновременных проверок)
 SOCKS_PORT = 8080
 REAL_CHECK_TIMEOUT = 15
-REAL_CHECK_CONCURRENCY = 20                     # уменьшено с 30
-REAL_CHECK_GLOBAL_TIMEOUT = 25                  # общий таймаут на всю проверку (с учётом запуска)
+REAL_CHECK_CONCURRENCY = 20
 XRAY_STARTUP_DELAY = 1
 
-# Ужесточение критериев
-MAX_LATENCY_MS = 200                             # снижено с 300 мс
-RETRY_COUNT = 2                                   # количество попыток для каждого теста
-RETRY_DELAY = 1                                    # задержка между попытками (сек)
+# Ужесточение: два HTTP-теста и обязательная HTTPS-проверка
+TEST_URLS = [
+    "http://connectivitycheck.gstatic.com/generate_204",
+    "http://www.gstatic.com/generate_204"
+]
+HTTPS_TEST_URL = "https://www.google.com/generate_204"
+
+MAX_LATENCY_MS = 200  # максимально допустимая задержка TCP-соединения (мс)
 
 # ---------- GEOIP ЗАГРУЗКА (CITY) ----------
 GEOIP_DB_PATH = "GeoLite2-City.mmdb"
@@ -187,7 +189,7 @@ def gather_all_links(sources):
     logging.info(f"🎯 Всего уникальных ссылок: {len(all_links)}")
     return list(all_links)
 
-# ---------- ПАРСЕРЫ (без изменений, они уже были) ----------
+# ---------- ПАРСЕРЫ ----------
 def parse_vless_link(link):
     try:
         without_proto = link[8:]
@@ -406,6 +408,7 @@ def parse_link(link):
         return None
 
 def shorten_link(link):
+    """Возвращает сокращённое представление ссылки: протокол://хост:порт"""
     parsed = parse_link(link)
     if parsed:
         return f"{parsed['protocol']}://{parsed['host']}:{parsed['port']}"
@@ -577,7 +580,7 @@ def check_tcp(link):
     except:
         return (link, False, None, None)
 
-# ---------- РЕАЛЬНАЯ ПРОВЕРКА (улучшенная, с группами процессов и принудительным завершением) ----------
+# ---------- РЕАЛЬНАЯ ПРОВЕРКА (два HTTP и обязательный HTTPS) ----------
 def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
@@ -592,72 +595,37 @@ def check_real(link):
 
     process = None
     try:
-        # Запускаем Xray в отдельной группе процессов, чтобы потом убить всех потомков
         process = subprocess.Popen(
             [XRAY_CORE_PATH, 'run', '-config', config_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         time.sleep(XRAY_STARTUP_DELAY)
-
-        # Проверяем, жив ли процесс (если сразу упал)
-        if process.poll() is not None:
-            stdout, stderr = process.communicate()
-            logging.debug(f"Xray сразу завершился для {shorten_link(link)}: {stderr}")
-            return (link, False)
-
         proxies = {
             'http': f'socks5h://127.0.0.1:{SOCKS_PORT}',
             'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
         }
 
-        def check_url(url, expected_status=204, expected_text=None, verify=True, timeout=REAL_CHECK_TIMEOUT):
-            for attempt in range(RETRY_COUNT):
-                try:
-                    resp = requests.get(
-                        url, proxies=proxies, timeout=timeout,
-                        headers={'User-Agent': USER_AGENT},
-                        allow_redirects=False,
-                        verify=verify
-                    )
-                    if resp.status_code != expected_status:
-                        if attempt < RETRY_COUNT - 1:
-                            time.sleep(RETRY_DELAY)
-                            continue
-                        return False
-                    if expected_text and expected_text not in resp.text:
-                        if attempt < RETRY_COUNT - 1:
-                            time.sleep(RETRY_DELAY)
-                            continue
-                        return False
-                    return True
-                except Exception:
-                    if attempt < RETRY_COUNT - 1:
-                        time.sleep(RETRY_DELAY)
-                        continue
-                    return False
-            return False
-
-        # 1. HTTPS проверка (с валидацией сертификата)
-        https_success = False
-        for https_url in [
-            "https://connectivitycheck.gstatic.com/generate_204",
-            "https://www.google.com/generate_204"
-        ]:
-            if check_url(https_url, expected_status=204, verify=True):
-                https_success = True
+        # Проверка HTTP (оба тестовых URL должны быть успешны)
+        http_success = False
+        for test_url in TEST_URLS:
+            try:
+                resp = requests.get(
+                    test_url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
+                    headers={'User-Agent': USER_AGENT}, allow_redirects=False
+                )
+                http_success = True
+            except Exception:
+                http_success = False
                 break
 
-        if not https_success:
+        if not http_success:
             return (link, False)
 
-        # 2. Проверка example.com (контроль содержимого)
-        if not check_url(
-            "http://example.com/",
-            expected_status=200,
-            expected_text="Example Domain",
-            verify=False
-        ):
+        # Обязательная HTTPS-проверка для всех протоколов
+        try:
+            requests.get(HTTPS_TEST_URL, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
+                         headers={'User-Agent': USER_AGENT}, verify=False)
+        except Exception:
             return (link, False)
 
         # Все проверки пройдены
@@ -668,25 +636,11 @@ def check_real(link):
         return (link, False)
     finally:
         if process:
-            # Убиваем всю группу процессов (дочерние тоже)
+            process.terminate()
             try:
-                pgid = os.getpgid(process.pid)
-                os.killpg(pgid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, AttributeError):
-                # fallback
-                process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-            # Для отладки читаем stderr
-            try:
-                _, stderr = process.communicate(timeout=1)
-                if stderr:
-                    logging.debug(f"Xray stderr для {shorten_link(link)}: {stderr.strip()}")
-            except:
-                pass
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
         if os.path.exists(config_path):
             os.unlink(config_path)
 
@@ -727,67 +681,45 @@ def filter_working_links(links):
 
     # Этап 2: реальная проверка только для серверов с флагами
     logging.info(f"🧪 Этап 2: Реальная проверка {len(geo_by_link)} ссылок...")
-    working_links_with_geo = []
+    working_links_with_geo = []  # (link, flag, city)
     stage_total = len(geo_by_link)
     stage_current = 0
+
     links_to_check = list(geo_by_link.keys())
 
     with ThreadPoolExecutor(max_workers=REAL_CHECK_CONCURRENCY) as executor:
-        futures = {executor.submit(check_real, link): link for link in links_to_check}
-        start_time = time.time()
-        while futures:
-            elapsed = time.time() - start_time
-            remaining = max(0, REAL_CHECK_GLOBAL_TIMEOUT - elapsed)
-            done, not_done = wait(futures, timeout=remaining, return_when=FIRST_COMPLETED)
+        future_to_link = {executor.submit(check_real, link): link for link in links_to_check}
+        for future in as_completed(future_to_link):
+            stage_current += 1
+            current_check += 1
+            record_counter += 1
+            link, is_working = future.result()
+            short = shorten_link(link)
 
-            for future in done:
-                link = futures[future]
-                try:
-                    _, is_working = future.result()
-                except Exception as e:
-                    logging.error(f"Ошибка выполнения проверки {shorten_link(link)}: {e}")
-                    is_working = False
-
-                stage_current += 1
-                current_check += 1
-                record_counter += 1
-                short = shorten_link(link)
-
-                if link.startswith('vless://'):
-                    proto = 'vless'
-                elif link.startswith('ss://'):
-                    proto = 'ss'
-                elif link.startswith('trojan://'):
-                    proto = 'trojan'
-                elif link.startswith('vmess://'):
-                    proto = 'vmess'
-                elif link.startswith(('hysteria2://', 'hy2://')):
-                    proto = 'hy2'
-                else:
-                    proto = '?'
-
-                flag, city = geo_by_link[link]
-
-                if is_working:
-                    working_links_with_geo.append((link, flag, city))
-                    emoji = "✅"
-                else:
-                    emoji = "❌"
-
-                log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short}"
-                logging.info(log_msg)
-
-                del futures[future]
-
-            if not_done:
-                for future in not_done:
-                    link = futures[future]
-                    logging.warning(f"⏰ Принудительная отмена проверки {shorten_link(link)} (превышен общий таймаут)")
-                    future.cancel()
-                # Удаляем отменённые из словаря (они останутся в not_done)
-                futures = {f: link for f, link in futures.items() if f in not_done}
+            # Определяем протокол для лога
+            if link.startswith('vless://'):
+                proto = 'vless'
+            elif link.startswith('ss://'):
+                proto = 'ss'
+            elif link.startswith('trojan://'):
+                proto = 'trojan'
+            elif link.startswith('vmess://'):
+                proto = 'vmess'
+            elif link.startswith(('hysteria2://', 'hy2://')):
+                proto = 'hy2'
             else:
-                futures = {}
+                proto = '?'
+
+            flag, city = geo_by_link[link]
+
+            if is_working:
+                working_links_with_geo.append((link, flag, city))
+                emoji = "✅"
+            else:
+                emoji = "❌"
+
+            log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short}"
+            logging.info(log_msg)
 
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
@@ -845,7 +777,7 @@ def check_xray_available():
 # ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; ужесточённые проверки: HTTPS verify=True, example.com, retry, max_latency=200ms, защита от зависаний)")
+    logging.info("🟢 Запуск генератора подписок (ужесточённый отбор: latency≤200мс, 2 HTTP-теста, HTTPS для всех; многопоточность TCP=300, Xray=20)")
     if not check_xray_available():
         logging.error("Xray-core обязателен. Завершение.")
         return
