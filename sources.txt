@@ -41,6 +41,9 @@ http://livpnsub.dpdns.org/sub.php?token=3d13acae01d6cbeb
 # Подписка для ЧС 
 https://vpnd.io/subscription/vless/ba802473859338c0571a13d2c974a826b52b54e0ad29d37ab9e982a90d2f6489
 
+# РОСТУНЕЛЬ
+https://subrostunnel.vercel.app/std.txt
+
 # Махса 👍
 https://raw.githubusercontent.com/MahsaNetConfigTopic/config/refs/heads/main/xray_final.txt
 
@@ -66,14 +69,23 @@ https://raw.githubusercontent.com/VP01596/vless-top15/refs/heads/main/top100.txt
 # juju
 https://github.com/WSJuJuB01/urban-succotash/releases/download/WS_VPN/NOTHINGV5.txt
 
+# WL RUS
+https://wlrus.lol/confs/blackl.txt
+
 # niyakwi
 https://raw.githubusercontent.com/Niyakwi/Vpn-config.txt/main/VPN.txt
 
 # черные списки
 https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS+All_RUS.txt
 
+# openray
+https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/1.txt
+
 # LimeVPNPaser
 https://raw.githubusercontent.com/LimeHi/LimeVPNGenerator/main/Keys.txt?v=1
+
+# АНОНИМУС 
+https://raw.githubusercontent.com/4n0nymou3/multi-proxy-config-fetcher/refs/heads/main/configs/proxy_configs.txt
 
 # 🐶BobiVPN Lite🐶
 https://raw.githubusercontent.com/seknei3/psychic-fiestas/refs/heads/main/bobi_vpn_lite.txt
@@ -86,6 +98,3 @@ https://ghostbin.axel.org/paste/3v63q/raw
 
 # 🐈‍⬛ VPN cat
 https://raw.githubusercontent.com/VPN-cat/VPN/refs/heads/main/configs/VPN-cat-top-100
-
-# LimeVPNPaser
-https://raw.githubusercontent.com/LimeHi/LimeVPNGenerator/main/Keys.txt?v=1
