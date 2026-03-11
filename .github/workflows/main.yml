@@ -1,9 +1,5 @@
 name: Check Vless Servers
 
-# Разрешаем Actions записывать в репозиторий
-permissions:
-  contents: write
-
 on:
   schedule:
     - cron: '0 19 * * *'   # 19:00 UTC = 00:00 Оренбург (UTC+5)
@@ -16,70 +12,29 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
-      # Кэш для Xray-core (зависит от изменений в GENERATOR.py)
-      - name: Cache Xray-core
-        id: cache-xray
-        uses: actions/cache@v4
-        with:
-          path: xray-core
-          key: ${{ runner.os }}-xray-${{ hashFiles('GENERATOR.py') }}
-          restore-keys: |
-            ${{ runner.os }}-xray-
-
-      # Кэш для GeoIP (обновляется раз в месяц, можно менять дату в ключе)
-      - name: Cache GeoIP database
-        id: cache-geoip
-        uses: actions/cache@v4
-        with:
-          path: GeoLite2-City.mmdb
-          # Дата в ключе - когда последний раз обновляли базу вручную
-          key: ${{ runner.os }}-geoip-2026-03-01
-          restore-keys: |
-            ${{ runner.os }}-geoip-
+          fetch-depth: 0   # нужна полная история для корректного pull/rebase
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # geoip2 должен быть в requirements.txt
+          pip install geoip2
 
-      - name: Download Xray-core (if not cached)
-        if: steps.cache-xray.outputs.cache-hit != 'true'
+      - name: Download Xray-core
         run: |
-          # Удаляем старую папку, если она есть (например, от предыдущего запуска без кэша)
-          rm -rf xray-core
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip -q -o Xray-linux-64.zip -d xray-core
+          unzip -q Xray-linux-64.zip -d xray-core
           chmod +x xray-core/xray
-          rm -f Xray-linux-64.zip
-
-      - name: Download GeoIP database (if not cached)
-        if: steps.cache-geoip.outputs.cache-hit != 'true'
-        run: |
-          wget -q https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb
-
-      - name: Add Xray to PATH
-        run: echo "$(pwd)/xray-core" >> $GITHUB_PATH
-
-      - name: Show versions
-        run: |
-          python --version
-          xray --version || true
-          ls -lh GeoLite2-City.mmdb || echo "GeoIP not found"
+          echo "$(pwd)/xray-core" >> $GITHUB_PATH
 
       - name: Run GENERATOR.py
         run: python GENERATOR.py
 
       - name: Commit and push if changed
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
@@ -88,7 +43,7 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Auto-update subscription files"
-            # Используем токен для аутентификации
-            git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
-            git push origin HEAD:main
+            git pull --rebase origin main
+            git push
           fi
+          
