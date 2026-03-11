@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
-# Ужесточена TCP-проверка: таймаут 5 с, макс. задержка 300 мс.
+# Ужесточена TCP-проверка: 3 последовательные попытки, таймаут 5 с, макс. задержка 300 мс.
 # Фильтрация: только Россия и следующие страны Европы: FI, EE, LV, LT, PL, DE, SE, MD, TR.
 # В подписках серверы сортируются по возрастанию задержки (самые быстрые в начале).
 
@@ -570,7 +570,7 @@ def create_xray_config(config):
     base_config["outbounds"].append(outbound)
     return base_config
 
-# ---------- TCP ПРОВЕРКА (возвращает IP и задержку при успехе) ----------
+# ---------- TCP ПРОВЕРКА (3 попытки) ----------
 def check_tcp(link):
     parsed = parse_link(link)
     if not parsed:
@@ -578,13 +578,22 @@ def check_tcp(link):
     host, port = parsed['host'], parsed['port']
     try:
         ip = resolve_host(host)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(TCP_CHECK_TIMEOUT)
-        start = time.time()
-        result = sock.connect_ex((ip, port))
-        latency_ms = int((time.time() - start) * 1000) if result == 0 else None
-        sock.close()
-        return (link, result == 0, ip if result == 0 else None, latency_ms)
+        latencies = []
+        for attempt in range(3):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(TCP_CHECK_TIMEOUT)
+            start = time.time()
+            result = sock.connect_ex((ip, port))
+            latency_ms = int((time.time() - start) * 1000) if result == 0 else None
+            sock.close()
+            if result != 0 or latency_ms is None:
+                return (link, False, None, None)
+            if latency_ms > MAX_LATENCY_MS:
+                return (link, False, None, None)
+            latencies.append(latency_ms)
+        # Все три попытки успешны и не превышают лимит
+        min_latency = min(latencies)
+        return (link, True, ip, min_latency)
     except:
         return (link, False, None, None)
 
@@ -682,10 +691,9 @@ def filter_working_links(links):
             current_check += 1
             link, ok, ip, latency = future.result()
             if ok and ip and latency is not None:
-                # Отсев по задержке
-                if latency <= MAX_LATENCY_MS:
-                    tcp_success.append((link, ip, latency))
-    logging.info(f"📊 TCP-проверка завершена. Прошли (latency <= {MAX_LATENCY_MS} мс): {len(tcp_success)}/{total_checks}")
+                # Отсев по задержке уже выполнен внутри check_tcp (все три попытки успешны и <= MAX_LATENCY_MS)
+                tcp_success.append((link, ip, latency))
+    logging.info(f"📊 TCP-проверка завершена. Прошли (3 успешные попытки, latency <= {MAX_LATENCY_MS} мс): {len(tcp_success)}/{total_checks}")
 
     if not tcp_success:
         return []
@@ -824,7 +832,7 @@ def check_xray_available():
 # ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; TCP-таймаут=5с, макс. задержка=300мс)")
+    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; TCP-таймаут=5с, 3 попытки, макс. задержка=300мс)")
     if not check_xray_available():
         logging.error("Xray-core обязателен. Завершение.")
         return
