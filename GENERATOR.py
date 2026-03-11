@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Улучшения: 3 попытки TCP, 3 попытки реальной проверки, замер задержки, DNS через DoH, динамические порты.
-# Вывод только строк с результатами проверки (✅/❌).
+# Вывод: общая статистика + строки с результатами проверки (✅/❌).
 
 import os
 import re
@@ -172,6 +172,7 @@ def read_sources():
                 line = line.strip()
                 if line and not line.startswith('#'):
                     sources.append(line)
+        logging.info(f"📚 Загружено {len(sources)} источников")
     except FileNotFoundError:
         logging.error(f"❌ Файл {SOURCES_FILE} не найден")
     return sources
@@ -710,6 +711,8 @@ def check_real(link):
 def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
+    logging.info(f"🌐 Этап 1: TCP-проверка {total_checks} ссылок...")
+    
     # Этап 1: TCP
     tcp_success = []
     with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
@@ -719,6 +722,8 @@ def filter_working_links(links):
             link, ok, ip, latency = future.result()
             if ok:
                 tcp_success.append((link, ip, latency))
+
+    logging.info(f"📊 TCP-проверка завершена. Прошли: {len(tcp_success)}/{total_checks}")
 
     if not tcp_success:
         return []
@@ -738,6 +743,7 @@ def filter_working_links(links):
         'SK', 'SI', 'ES', 'SE', 'CH', 'UA', 'GB', 'VA', 'TR'
     }
     filtered_candidates = [c for c in candidates if c[3] in european_countries]
+    logging.info(f"🌍 Российских и европейских: {len(filtered_candidates)}")
 
     if not filtered_candidates:
         return []
@@ -766,7 +772,6 @@ def filter_working_links(links):
             else:
                 emoji = "❌"
 
-            # Единственное место, где мы пишем в лог
             logging.info(f"{proto} {emoji} [{processed}/{total_to_check}]: {short} (tcp_latency={latency}ms)")
 
     return working_links_with_geo
@@ -821,6 +826,7 @@ def main():
         return
 
     all_links = gather_all_links(sources)
+    logging.info(f"📦 Всего уникальных ссылок: {len(all_links)}")
     if not all_links:
         return
 
@@ -834,6 +840,9 @@ def main():
 
     rus_links = [item for item in working_links_with_geo if item[3] == 'RU']
     eur_links = [item for item in working_links_with_geo if item[3] in allowed_eur_countries and item[3] != 'RU']
+
+    logging.info(f"🇷🇺 Российских серверов: {len(rus_links)}")
+    logging.info(f"🇪🇺 Европейских (FI, EE, LV, LT, PL, DE, SE, MD, TR): {len(eur_links)}")
 
     save_working_links_group(
         rus_links, OUTPUT_RUS_FILE, RUS_PROFILE_TITLE, RUS_SUPPORT_URL, RUS_PROFILE_WEB_PAGE_URL
