@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
-# Добавлена фильтрация: только российские и европейские серверы.
-# В подписке сначала российские ключи, потом европейские.
+# Ужесточена TCP-проверка: таймаут 5 с, макс. задержка 300 мс.
+# Фильтрация: только Россия и Европа, в подписке сначала российские ключи.
 
 import os
 import re
@@ -68,9 +68,10 @@ REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 XRAY_CORE_PATH = "xray"
 
-# TCP-проверка
-TCP_CHECK_TIMEOUT = 10
+# TCP-проверка (ужесточена)
+TCP_CHECK_TIMEOUT = 5           # было 10, уменьшено для быстрого отсева мёртвых
 TCP_MAX_WORKERS = 400
+MAX_LATENCY_MS = 300             # было 500, теперь только быстрые серверы
 
 # Реальная проверка
 SOCKS_PORT = 8080
@@ -81,8 +82,6 @@ XRAY_STARTUP_DELAY = 1
 TEST_URLS = [
     "http://connectivitycheck.gstatic.com/generate_204"
 ]
-
-MAX_LATENCY_MS = 500  # максимально допустимая задержка TCP-соединения (мс)
 
 # ---------- GEOIP ЗАГРУЗКА (CITY) ----------
 GEOIP_DB_PATH = "GeoLite2-City.mmdb"
@@ -156,7 +155,6 @@ def fetch_content(url):
         return None
 
 def extract_links_from_text(text):
-    # Добавлены vmess и hysteria2/hy2
     return re.findall(r'(?:vless|ss|trojan|vmess|hysteria2|hy2)://[^\s<>"\']+', text)
 
 def decode_base64_content(encoded):
@@ -810,7 +808,7 @@ def check_xray_available():
 # ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, Xray=15с, отсев по TCP latency >500 мс, все проверки однократные)")
+    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; TCP-таймаут=5с, макс. задержка=300мс)")
     if not check_xray_available():
         logging.error("Xray-core обязателен. Завершение.")
         return
