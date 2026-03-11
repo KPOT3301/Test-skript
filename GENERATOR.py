@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
-# Улучшения: 3 попытки TCP, 3 попытки реальной проверки, замер задержки, DNS через DoH, динамические порты.
-# Вывод: общая статистика + строки с результатами проверки (✅/❌).
+# Все основные настройки вынесены в начало для удобства.
+# Добавлен случайный выбор User-Agent из списка популярных.
 
 import os
 import re
@@ -33,7 +33,7 @@ logging.basicConfig(
     force=True
 )
 
-# ---------- СЧЁТЧИКИ ДЛЯ ЛОГОВ ----------
+# ---------- ГЛОБАЛЬНЫЕ СЧЁТЧИКИ ----------
 record_counter = 0
 current_check = 0
 total_checks = 0
@@ -49,14 +49,22 @@ TODAY_STR = LOCAL_NOW.strftime("%d-%m-%Y")
 
 import requests
 
-# ---------- GEOIP (CITY) ----------
+# =============================================================================
+#                          НАСТРАИВАЕМЫЕ КОНСТАНТЫ
+# =============================================================================
+
+# ---------- GeoIP ----------
+GEOIP_AVAILABLE = False
 try:
     import geoip2.database
     GEOIP_AVAILABLE = True
 except ImportError:
-    GEOIP_AVAILABLE = False
+    pass
 
-# ---------- КОНСТАНТЫ ПОДПИСОК ----------
+GEOIP_DB_PATH = "GeoLite2-City.mmdb"
+GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
+
+# ---------- Заголовки подписок ----------
 RUS_PROFILE_TITLE = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 RUS_SUPPORT_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 RUS_PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
@@ -67,29 +75,42 @@ EUR_PROFILE_WEB_PAGE_URL = "🇪🇺КРОТовыеТОННЕЛИ🇪🇺"
 PROFILE_UPDATE_INTERVAL = "1"
 SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
 
-# ---------- ОСНОВНЫЕ КОНСТАНТЫ ----------
+# ---------- Входные / выходные файлы ----------
 SOURCES_FILE = "sources.txt"
 OUTPUT_RUS_FILE = "subscription_RUS.txt"
 OUTPUT_RUS_BASE64_FILE = "subscription_RUS_base64.txt"
 OUTPUT_EUR_FILE = "subscription_EUR.txt"
 OUTPUT_EUR_BASE64_FILE = "subscription_EUR_base64.txt"
 
+# ---------- Общие сетевые настройки ----------
 REQUEST_TIMEOUT = 10
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 XRAY_CORE_PATH = "xray"
 
-# TCP-проверка
-TCP_CHECK_TIMEOUT = 5
-TCP_MAX_WORKERS = 400
-MAX_LATENCY_MS = 300
+# ---------- Список User-Agent для случайного выбора ----------
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Android 14; Mobile; rv:121.0) Gecko/121.0 Firefox/121.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36",
+]
 
-# Реальная проверка
-REAL_CHECK_TIMEOUT = 15
-REAL_CHECK_CONCURRENCY = 20
-REAL_CHECK_ATTEMPTS = 3
-MAX_HTTP_LATENCY_MS = 1000
+# ---------- TCP-проверка (этап 1) ----------
+TCP_CHECK_TIMEOUT = 5           # таймаут соединения, секунд
+TCP_MAX_WORKERS = 400            # количество параллельных потоков
+MAX_LATENCY_MS = 300             # максимальная допустимая TCP-задержка (мс)
+TCP_ATTEMPTS = 5                 # количество попыток TCP-соединения
 
-# Тестовые URL
+# ---------- Реальная проверка через Xray (этап 2) ----------
+REAL_CHECK_TIMEOUT = 10         # таймаут HTTP/HTTPS запросов (секунд)
+REAL_CHECK_CONCURRENCY = 30       # параллельных проверок Xray
+REAL_CHECK_ATTEMPTS = 1           # количество попыток реальной проверки
+MAX_HTTP_LATENCY_MS = 500        # максимальная задержка HTTP (мс) – отсев медленных
+
+# ---------- Тестовые URL для проверки ----------
 TEST_HTTP_URLS = [
     "http://connectivitycheck.gstatic.com/generate_204",
     "http://www.msftncsi.com/ncsi.txt",
@@ -101,34 +122,32 @@ TEST_HTTPS_URLS = [
     "https://cloudflare.com/cdn-cgi/trace"
 ]
 
-# DNS-over-HTTPS проверка (через прокси)
+# ---------- DNS-over-HTTPS проверка ----------
 DOH_URL = "https://1.1.1.1/dns-query?name=google.com&type=A"
 DOH_HEADERS = {"Accept": "application/dns-json"}
 
-# Диапазон локальных портов для SOCKS
+# ---------- Диапазон локальных портов для SOCKS (динамическое выделение) ----------
 SOCKS_PORT_START = 10000
 SOCKS_PORT_END = 11000
 
-# ---------- GEOIP ЗАГРУЗКА ----------
-GEOIP_DB_PATH = "GeoLite2-City.mmdb"
-GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
+# ---------- Гео-фильтр: разрешённые европейские страны ----------
+ALLOWED_EUR_COUNTRIES = {'FI', 'EE', 'LV', 'LT', 'PL', 'DE', 'SE', 'MD', 'TR'}
 
-def ensure_geoip_db():
-    if not GEOIP_AVAILABLE:
-        return False
-    if os.path.exists(GEOIP_DB_PATH):
-        return True
-    try:
-        r = requests.get(GEOIP_DB_URL, timeout=30)
-        r.raise_for_status()
-        with open(GEOIP_DB_PATH, 'wb') as f:
-            f.write(r.content)
-        return True
-    except Exception:
-        return False
+# =============================================================================
+#                          КОНЕЦ НАСТРОЕК
+# =============================================================================
 
+# ---------- Загрузка GeoIP (если доступно) ----------
 reader = None
-if ensure_geoip_db():
+if GEOIP_AVAILABLE:
+    if not os.path.exists(GEOIP_DB_PATH):
+        try:
+            r = requests.get(GEOIP_DB_URL, timeout=30, headers={'User-Agent': random.choice(USER_AGENTS)})
+            r.raise_for_status()
+            with open(GEOIP_DB_PATH, 'wb') as f:
+                f.write(r.content)
+        except Exception:
+            pass
     try:
         reader = geoip2.database.Reader(GEOIP_DB_PATH)
     except Exception:
@@ -146,7 +165,7 @@ def get_geo_info(ip):
     except Exception:
         return "", "", ""
 
-# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+# ---------- Вспомогательные функции ----------
 @lru_cache(maxsize=256)
 def resolve_host(host):
     return socket.gethostbyname(host)
@@ -179,7 +198,7 @@ def read_sources():
 
 def fetch_content(url):
     try:
-        resp = requests.get(url, timeout=REQUEST_TIMEOUT, headers={'User-Agent': USER_AGENT})
+        resp = requests.get(url, timeout=REQUEST_TIMEOUT, headers={'User-Agent': random.choice(USER_AGENTS)})
         resp.raise_for_status()
         return resp.text
     except Exception:
@@ -212,7 +231,7 @@ def gather_all_links(sources):
             all_links.add(link)
     return list(all_links)
 
-# ---------- ПАРСЕРЫ ----------
+# ---------- Парсеры (полные, как в предыдущих версиях) ----------
 def parse_vless_link(link):
     try:
         without_proto = link[8:]
@@ -583,7 +602,7 @@ def check_tcp(link):
     try:
         ip = resolve_host(host)
         latencies = []
-        for _ in range(3):
+        for _ in range(TCP_ATTEMPTS):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(TCP_CHECK_TIMEOUT)
             start = time.time()
@@ -599,7 +618,7 @@ def check_tcp(link):
     except:
         return (link, False, None, None)
 
-# ---------- РЕАЛЬНАЯ ПРОВЕРКА (3 попытки) ----------
+# ---------- РЕАЛЬНАЯ ПРОВЕРКА (3 попытки, но REAL_CHECK_ATTEMPTS теперь 1) ----------
 def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
@@ -646,7 +665,7 @@ def check_real(link):
                     start = time.time()
                     requests.get(
                         url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                        headers={'User-Agent': USER_AGENT}, allow_redirects=False
+                        headers={'User-Agent': random.choice(USER_AGENTS)}, allow_redirects=False
                     )
                     http_ok = True
                     break
@@ -663,7 +682,7 @@ def check_real(link):
                         start = time.time()
                         requests.get(
                             url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                            headers={'User-Agent': USER_AGENT}, verify=False
+                            headers={'User-Agent': random.choice(USER_AGENTS)}, verify=False
                         )
                         https_ok = True
                         break
@@ -677,7 +696,7 @@ def check_real(link):
                 start = time.time()
                 resp = requests.get(
                     DOH_URL, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                    headers={'User-Agent': USER_AGENT, **DOH_HEADERS}, verify=False
+                    headers={'User-Agent': random.choice(USER_AGENTS), **DOH_HEADERS}, verify=False
                 )
                 data = resp.json()
                 if 'Answer' not in data or len(data['Answer']) == 0:
@@ -687,11 +706,12 @@ def check_real(link):
 
             return True
 
-        # Три попытки
+        # Выполняем REAL_CHECK_ATTEMPTS попыток
         for attempt in range(REAL_CHECK_ATTEMPTS):
             if not single_check():
                 return (link, False)
-            time.sleep(0.5)
+            if attempt < REAL_CHECK_ATTEMPTS - 1:
+                time.sleep(0.5)
 
         return (link, True)
 
@@ -801,6 +821,7 @@ def create_base64_subscription_for_file(input_file, output_file):
             encoded = base64.b64encode(f.read()).decode('ascii')
         with open(output_file, 'w', encoding='ascii') as f:
             f.write(encoded)
+        logging.info(f"💾 Base64-версия сохранена в {output_file}")
     except Exception as e:
         logging.error(f"❌ Ошибка создания Base64 для {input_file}: {e}")
 
@@ -836,25 +857,28 @@ def main():
 
     working_links_with_geo = filter_working_links(all_links)
 
-    allowed_eur_countries = {'FI', 'EE', 'LV', 'LT', 'PL', 'DE', 'SE', 'MD', 'TR'}
-
     rus_links = [item for item in working_links_with_geo if item[3] == 'RU']
-    eur_links = [item for item in working_links_with_geo if item[3] in allowed_eur_countries and item[3] != 'RU']
+    eur_links = [item for item in working_links_with_geo if item[3] in ALLOWED_EUR_COUNTRIES and item[3] != 'RU']
 
     logging.info(f"🇷🇺 Российских серверов: {len(rus_links)}")
     logging.info(f"🇪🇺 Европейских (FI, EE, LV, LT, PL, DE, SE, MD, TR): {len(eur_links)}")
 
-    save_working_links_group(
+    written_rus = save_working_links_group(
         rus_links, OUTPUT_RUS_FILE, RUS_PROFILE_TITLE, RUS_SUPPORT_URL, RUS_PROFILE_WEB_PAGE_URL
     )
-    save_working_links_group(
+    if written_rus > 0:
+        logging.info(f"✅ Сохранено {written_rus} российских серверов в {OUTPUT_RUS_FILE}")
+        create_base64_subscription_for_file(OUTPUT_RUS_FILE, OUTPUT_RUS_BASE64_FILE)
+
+    written_eur = save_working_links_group(
         eur_links, OUTPUT_EUR_FILE, EUR_PROFILE_TITLE, EUR_SUPPORT_URL, EUR_PROFILE_WEB_PAGE_URL
     )
-
-    if rus_links:
-        create_base64_subscription_for_file(OUTPUT_RUS_FILE, OUTPUT_RUS_BASE64_FILE)
-    if eur_links:
+    if written_eur > 0:
+        logging.info(f"✅ Сохранено {written_eur} европейских серверов в {OUTPUT_EUR_FILE}")
         create_base64_subscription_for_file(OUTPUT_EUR_FILE, OUTPUT_EUR_BASE64_FILE)
+
+    total_saved = written_rus + written_eur
+    logging.info(f"📊 Всего сохранено ключей: {total_saved}")
 
 if __name__ == "__main__":
     main()
