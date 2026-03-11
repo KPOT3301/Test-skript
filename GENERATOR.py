@@ -73,34 +73,33 @@ REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 XRAY_CORE_PATH = "xray"
 
-# TCP-проверка (изменено: 3 попытки, порог 2 успешных)
-TCP_CHECK_TIMEOUT = 10
+# ИЗМЕНЕНО: таймауты уменьшены
+TCP_CHECK_TIMEOUT = 5                # было 10
 TCP_MAX_WORKERS = 200
 TCP_RETRY_COUNT = 3
 TCP_SUCCESS_THRESHOLD = 2
 
 # Реальная проверка
 SOCKS_PORT = 8080
-REAL_CHECK_TIMEOUT = 15
+REAL_CHECK_TIMEOUT = 8                # было 15
 REAL_CHECK_CONCURRENCY = 30
-XRAY_STARTUP_DELAY = 1
+# XRAY_STARTUP_DELAY больше не используется, заменён на wait_for_socks
 
-# Списки тестовых URL
+# ИЗМЕНЕНО: списки URL сокращены до одного каждого типа
 HTTP_TEST_URLS = [
-    "http://connectivitycheck.gstatic.com/generate_204",
-    "http://www.google.com/generate_204",
-    "http://cloudflare.com/generate_204"
+    "http://connectivitycheck.gstatic.com/generate_204"
+    # можно добавить запасной, но для простоты оставим один
 ]
 HTTPS_TEST_URLS = [
-    "https://www.google.com/generate_204",
-    "https://connectivitycheck.gstatic.com/generate_204"
+    "https://www.google.com/generate_204"
 ]
 
 # Параметры HTTP-проверки
-HTTP_RETRIES = 3                      # количество попыток для каждого URL
-MAX_HTTP_LATENCY_MS = 2000            # максимальная задержка ответа (мс)
+HTTP_RETRIES = 3
+MAX_HTTP_LATENCY_MS = 2000
 
-MAX_LATENCY_MS = 300
+# ИЗМЕНЕНО: максимальная средняя задержка TCP уменьшена до 200 мс
+MAX_LATENCY_MS = 200                   # было 300
 MAX_LATENCY_JITTER_MS = 100
 
 # ---------- GEOIP ЗАГРУЗКА (CITY) ----------
@@ -433,6 +432,48 @@ def shorten_link(link):
         return link[:q_pos]
     return link[:80]
 
+# ---------- ДОБАВЛЕНО: проверка валидности конфига (отсев мусора) ----------
+def is_config_valid(config):
+    """
+    Проверяет наличие обязательных полей для каждого протокола.
+    Возвращает True, если конфиг можно использовать.
+    """
+    if not config:
+        return False
+    proto = config.get('protocol')
+    if proto == 'vless':
+        return bool(config.get('uuid') and config.get('host') and config.get('port'))
+    elif proto == 'ss':
+        return bool(config.get('method') and config.get('password') and config.get('host') and config.get('port'))
+    elif proto == 'trojan':
+        return bool(config.get('password') and config.get('host') and config.get('port'))
+    elif proto == 'vmess':
+        return bool(config.get('uuid') and config.get('host') and config.get('port'))
+    elif proto == 'hysteria2':
+        return bool(config.get('password') and config.get('host') and config.get('port'))
+    else:
+        return False
+
+# ---------- ДОБАВЛЕНО: ожидание готовности SOCKS-порта ----------
+def wait_for_socks(port, timeout=2):
+    """
+    Ожидает, пока SOCKS-порт на 127.0.0.1 начнёт отвечать.
+    Возвращает True, если порт открылся в течение timeout секунд.
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            result = sock.connect_ex(('127.0.0.1', port))
+            sock.close()
+            if result == 0:
+                return True
+        except:
+            pass
+        time.sleep(0.1)
+    return False
+
 # ---------- СОЗДАНИЕ КОНФИГА XRAY ----------
 def create_xray_config(config):
     base_config = {
@@ -634,11 +675,19 @@ def check_tcp_multiple(link):
     
     return (link, True, ip, latencies)
 
-# ---------- РЕАЛЬНАЯ ПРОВЕРКА (ужесточённая) ----------
+# ---------- РЕАЛЬНАЯ ПРОВЕРКА (ужесточённая, оптимизированная) ----------
 def check_real(link):
+    # Парсим ссылку
     config_dict = parse_link(link)
     if not config_dict:
         return (link, False)
+
+    # ДОБАВЛЕНО: предварительная фильтрация мусора
+    if not is_config_valid(config_dict):
+        logging.debug(f"❌ Конфиг невалиден (пропущены обязательные поля): {shorten_link(link)}")
+        return (link, False)
+
+    # Создаём конфиг Xray
     xray_config = create_xray_config(config_dict)
     if not xray_config:
         return (link, False)
@@ -653,13 +702,18 @@ def check_real(link):
             [XRAY_CORE_PATH, 'run', '-config', config_path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
-        time.sleep(XRAY_STARTUP_DELAY)
+
+        # ИЗМЕНЕНО: вместо фиксированной задержки ждём готовности порта
+        if not wait_for_socks(SOCKS_PORT, timeout=2):
+            logging.debug(f"❌ SOCKS-порт не открылся вовремя: {shorten_link(link)}")
+            return (link, False)
+
         proxies = {
             'http': f'socks5h://127.0.0.1:{SOCKS_PORT}',
             'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
         }
 
-        # Определяем, нужно ли проверять HTTPS (для TLS-ключей)
+        # Определяем, нужен ли HTTPS
         needs_https = False
         if config_dict['protocol'] in ('vless', 'vmess', 'trojan', 'hysteria2'):
             if config_dict['protocol'] == 'vmess':
@@ -671,15 +725,12 @@ def check_real(link):
                 if security in ('tls', 'reality'):
                     needs_https = True
 
-        # Формируем список URL для проверки
-        urls_to_check = []
-        urls_to_check.extend(HTTP_TEST_URLS)
-        if needs_https:
-            urls_to_check.extend(HTTPS_TEST_URLS)
+        # ИЗМЕНЕНО: используем только по одному URL каждого типа
+        http_url = HTTP_TEST_URLS[0]
+        https_url = HTTPS_TEST_URLS[0] if needs_https else None
 
-        # Проверяем каждый URL
-        for url in urls_to_check:
-            success_for_url = False
+        # Функция для проверки одного URL с несколькими попытками
+        def check_url(url, desc):
             for attempt in range(HTTP_RETRIES):
                 try:
                     start_time = time.time()
@@ -689,18 +740,60 @@ def check_real(link):
                     )
                     elapsed_ms = int((time.time() - start_time) * 1000)
                     if resp.status_code in (200, 204) and elapsed_ms <= MAX_HTTP_LATENCY_MS:
-                        success_for_url = True
-                        logging.debug(f"✅ URL {url} успешен за {elapsed_ms}мс (попытка {attempt+1})")
-                        break
+                        logging.debug(f"✅ {desc} успешен за {elapsed_ms}мс (попытка {attempt+1})")
+                        return True
                     else:
-                        logging.debug(f"⚠️ URL {url} попытка {attempt+1}: статус {resp.status_code}, время {elapsed_ms}мс")
+                        logging.debug(f"⚠️ {desc} попытка {attempt+1}: статус {resp.status_code}, время {elapsed_ms}мс")
                 except Exception as e:
-                    logging.debug(f"⚠️ URL {url} попытка {attempt+1}: исключение {str(e)[:50]}")
+                    logging.debug(f"⚠️ {desc} попытка {attempt+1}: исключение {str(e)[:50]}")
                     continue
-            if not success_for_url:
-                return (link, False)
+            return False
 
-        # Все URL успешно проверены
+        # Проверяем HTTP
+        if not check_url(http_url, "HTTP"):
+            return (link, False)
+
+        # Если нужен HTTPS, проверяем его
+        if https_url and not check_url(https_url, "HTTPS"):
+            return (link, False)
+
+        # Проверка стабильности: пауза 2 сек и повтор HTTP
+        time.sleep(2)
+        if not check_url(http_url, "HTTP (повтор)"):
+            return (link, False)
+
+        # ---------- Проверка смены IP через ip-api.com ----------
+        # Получаем реальный IP сервера (без прокси)
+        real_ip = None
+        try:
+            resp = requests.get("http://ip-api.com/json/", timeout=REQUEST_TIMEOUT, headers={'User-Agent': USER_AGENT})
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('status') == 'success':
+                    real_ip = data.get('query')
+        except Exception as e:
+            logging.debug(f"Не удалось получить реальный IP: {e}")
+
+        # Получаем IP через прокси
+        proxy_ip = None
+        try:
+            resp = requests.get("http://ip-api.com/json/", proxies=proxies, timeout=REAL_CHECK_TIMEOUT, headers={'User-Agent': USER_AGENT})
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('status') == 'success':
+                    proxy_ip = data.get('query')
+        except Exception as e:
+            logging.debug(f"Не удалось получить IP через прокси: {e}")
+
+        if proxy_ip is None:
+            logging.debug("❌ Не удалось получить IP через прокси")
+            return (link, False)
+
+        if real_ip is not None and proxy_ip == real_ip:
+            logging.debug(f"❌ IP через прокси совпадает с реальным IP сервера ({proxy_ip})")
+            return (link, False)
+
+        # Все проверки пройдены
         return (link, True)
 
     except Exception as e:
@@ -874,7 +967,7 @@ def check_xray_available():
 # ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, Xray=15с, отсев по TCP latency, TCP-проверка 3 раза, этап 2: многократные HTTP запросы, замер времени, проверка нескольких сайтов)")
+    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=5с, Xray=8с, отсев по TCP latency, TCP-проверка 3 раза, этап 2: многократные HTTP запросы, замер времени, проверка нескольких сайтов)")
     if not check_xray_available():
         logging.error("Xray-core обязателен. Завершение.")
         return
