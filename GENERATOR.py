@@ -4,8 +4,9 @@
 # отсев по latency (TCP) сразу после первого этапа, упрощённый лог.
 # Оптимизация: флаг и город определяются сразу после TCP, реальная проверка только для серверов с флагом
 # Ускорение Xray: 30 потоков, задержка 1с, таймаут 15с, все проверки однократные.
-# Ужесточение: TCP-проверка выполняется 10 раз для каждого сервера
-# Добавлены логи прогресса (каждые ~10%) для наглядности отсева
+# Ужесточение: TCP-проверка выполняется 3 раза для каждого сервера (было 10)
+# Добавлены логи прогресса (каждые ~10%) для наглядности отсева.
+# Ужесточение этапа 2: многократные HTTP-запросы (3 попытки), замер времени ответа (2 сек), проверка нескольких сайтов (все должны быть успешны).
 
 import os
 import re
@@ -72,11 +73,11 @@ REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 XRAY_CORE_PATH = "xray"
 
-# TCP-проверка
+# TCP-проверка (изменено: 3 попытки, порог 2 успешных)
 TCP_CHECK_TIMEOUT = 10
 TCP_MAX_WORKERS = 200
-TCP_RETRY_COUNT = 10
-TCP_SUCCESS_THRESHOLD = 7
+TCP_RETRY_COUNT = 3
+TCP_SUCCESS_THRESHOLD = 2
 
 # Реальная проверка
 SOCKS_PORT = 8080
@@ -84,9 +85,20 @@ REAL_CHECK_TIMEOUT = 15
 REAL_CHECK_CONCURRENCY = 30
 XRAY_STARTUP_DELAY = 1
 
-TEST_URLS = [
-    "http://connectivitycheck.gstatic.com/generate_204"
+# Списки тестовых URL
+HTTP_TEST_URLS = [
+    "http://connectivitycheck.gstatic.com/generate_204",
+    "http://www.google.com/generate_204",
+    "http://cloudflare.com/generate_204"
 ]
+HTTPS_TEST_URLS = [
+    "https://www.google.com/generate_204",
+    "https://connectivitycheck.gstatic.com/generate_204"
+]
+
+# Параметры HTTP-проверки
+HTTP_RETRIES = 3                      # количество попыток для каждого URL
+MAX_HTTP_LATENCY_MS = 2000            # максимальная задержка ответа (мс)
 
 MAX_LATENCY_MS = 300
 MAX_LATENCY_JITTER_MS = 100
@@ -566,7 +578,7 @@ def create_xray_config(config):
     base_config["outbounds"].append(outbound)
     return base_config
 
-# ---------- МНОГОКРАТНАЯ TCP ПРОВЕРКА (10 раз с анализом стабильности) ----------
+# ---------- TCP ПРОВЕРКА (3 раза с анализом стабильности) ----------
 def check_tcp_multiple(link):
     """
     Выполняет TCP-проверку TCP_RETRY_COUNT раз.
@@ -622,7 +634,7 @@ def check_tcp_multiple(link):
     
     return (link, True, ip, latencies)
 
-# ---------- РЕАЛЬНАЯ ПРОВЕРКА (однократная, без повторов) ----------
+# ---------- РЕАЛЬНАЯ ПРОВЕРКА (ужесточённая) ----------
 def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
@@ -647,6 +659,7 @@ def check_real(link):
             'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
         }
 
+        # Определяем, нужно ли проверять HTTPS (для TLS-ключей)
         needs_https = False
         if config_dict['protocol'] in ('vless', 'vmess', 'trojan', 'hysteria2'):
             if config_dict['protocol'] == 'vmess':
@@ -658,29 +671,36 @@ def check_real(link):
                 if security in ('tls', 'reality'):
                     needs_https = True
 
-        http_success = False
-        for test_url in TEST_URLS:
-            try:
-                resp = requests.get(
-                    test_url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                    headers={'User-Agent': USER_AGENT}, allow_redirects=False
-                )
-                http_success = True
-                break
-            except Exception:
-                continue
-
-        if not http_success:
-            return (link, False)
-
+        # Формируем список URL для проверки
+        urls_to_check = []
+        urls_to_check.extend(HTTP_TEST_URLS)
         if needs_https:
-            try:
-                https_test = "https://www.google.com/generate_204"
-                requests.get(https_test, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                             headers={'User-Agent': USER_AGENT}, verify=False)
-            except Exception:
+            urls_to_check.extend(HTTPS_TEST_URLS)
+
+        # Проверяем каждый URL
+        for url in urls_to_check:
+            success_for_url = False
+            for attempt in range(HTTP_RETRIES):
+                try:
+                    start_time = time.time()
+                    resp = requests.get(
+                        url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
+                        headers={'User-Agent': USER_AGENT}, allow_redirects=False, verify=False
+                    )
+                    elapsed_ms = int((time.time() - start_time) * 1000)
+                    if resp.status_code in (200, 204) and elapsed_ms <= MAX_HTTP_LATENCY_MS:
+                        success_for_url = True
+                        logging.debug(f"✅ URL {url} успешен за {elapsed_ms}мс (попытка {attempt+1})")
+                        break
+                    else:
+                        logging.debug(f"⚠️ URL {url} попытка {attempt+1}: статус {resp.status_code}, время {elapsed_ms}мс")
+                except Exception as e:
+                    logging.debug(f"⚠️ URL {url} попытка {attempt+1}: исключение {str(e)[:50]}")
+                    continue
+            if not success_for_url:
                 return (link, False)
 
+        # Все URL успешно проверены
         return (link, True)
 
     except Exception as e:
@@ -703,11 +723,11 @@ def filter_working_links(links):
     logging.info(f"🚀 Начинаю двухуровневую проверку {total_checks} ссылок")
     logging.info(f"📊 Параметры TCP-проверки: {TCP_RETRY_COUNT} попыток, успешных >= {TCP_SUCCESS_THRESHOLD}, latency <= {MAX_LATENCY_MS}мс, jitter <= {MAX_LATENCY_JITTER_MS}мс")
 
-    # ---------- Этап 1: Многократная TCP-проверка ----------
+    # Этап 1: Многократная TCP-проверка
     logging.info(f"🌐 Этап 1: Многократная TCP-проверка ({TCP_RETRY_COUNT} раз) {total_checks} ссылок...")
-    tcp_success = []          # (link, ip, latencies)
+    tcp_success = []
     tcp_passed_count = 0
-    tcp_step = max(1, total_checks // 10)   # логируем каждые ~10% обработанных ссылок
+    tcp_step = max(1, total_checks // 10)
 
     with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
         future_to_link = {executor.submit(check_tcp_multiple, link): link for link in links}
@@ -726,7 +746,6 @@ def filter_working_links(links):
             else:
                 logging.debug(f"❌ TCP не прошел: {shorten_link(link)} | Успешно: {successful_attempts}/{TCP_RETRY_COUNT} ({success_rate:.0f}%)")
 
-            # Промежуточный лог прогресса TCP
             if current_check % tcp_step == 0:
                 percent = (current_check / total_checks) * 100
                 logging.info(f"🔄 TCP прогресс: обработано {current_check}/{total_checks} ({percent:.1f}%), прошло {tcp_passed_count}")
@@ -736,9 +755,9 @@ def filter_working_links(links):
     if not tcp_success:
         return []
 
-    # ---------- Определение геоданных ----------
+    # Определение геоданных
     logging.info(f"🌍 Определение геоданных для {len(tcp_success)} серверов...")
-    geo_by_link = {}  # link -> (flag, city, latencies)
+    geo_by_link = {}
     for link, ip, latencies in tcp_success:
         flag, city = get_geo_info(ip) if ip else ("", "")
         if flag:
@@ -749,13 +768,13 @@ def filter_working_links(links):
     if not geo_by_link:
         return []
 
-    # ---------- Этап 2: реальная проверка ----------
+    # Этап 2: реальная проверка
     logging.info(f"🧪 Этап 2: Реальная проверка {len(geo_by_link)} ссылок...")
-    working_links_with_geo = []  # (link, flag, city)
+    working_links_with_geo = []
     stage_total = len(geo_by_link)
     stage_current = 0
     stage_passed = 0
-    stage_step = max(1, stage_total // 10)   # логируем каждые ~10%
+    stage_step = max(1, stage_total // 10)
 
     links_to_check = list(geo_by_link.keys())
 
@@ -795,7 +814,6 @@ def filter_working_links(links):
             log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short} | {flag} | {avg_latency:.0f}мс ({successful_attempts}/{TCP_RETRY_COUNT})"
             logging.info(log_msg)
 
-            # Промежуточный лог прогресса реальной проверки
             if stage_current % stage_step == 0:
                 percent = (stage_current / stage_total) * 100
                 logging.info(f"🔄 REAL прогресс: проверено {stage_current}/{stage_total} ({percent:.1f}%), рабочих {stage_passed}")
@@ -856,7 +874,7 @@ def check_xray_available():
 # ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, Xray=15с, отсев по TCP latency, многократная TCP-проверка 10 раз)")
+    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, Xray=15с, отсев по TCP latency, TCP-проверка 3 раза, этап 2: многократные HTTP запросы, замер времени, проверка нескольких сайтов)")
     if not check_xray_available():
         logging.error("Xray-core обязателен. Завершение.")
         return
