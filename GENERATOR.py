@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Ужесточена TCP-проверка: таймаут 5 с, макс. задержка 300 мс.
-# Фильтрация: только Россия и Европа, в подписке сначала российские ключи.
+# Фильтрация: только Россия и Европа.
+# Результат разделяется: российские ключи → subscription_RUS.txt и _base64, европейские → subscription_EUR.txt и _base64.
+# Заголовки европейской подписки используют флаг EU.
 
 import os
 import re
@@ -53,25 +55,36 @@ except ImportError:
     GEOIP_AVAILABLE = False
     logging.warning("⚠️ geoip2 не установлена. Флаги стран и города не будут добавлены.")
 
-# ---------- КОНСТАНТЫ ПОДПИСКИ ----------
-PROFILE_TITLE = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
-SUPPORT_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
-PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
+# ---------- КОНСТАНТЫ ПОДПИСОК ----------
+# Российская подписка
+RUS_PROFILE_TITLE = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
+RUS_SUPPORT_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
+RUS_PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
+# Европейская подписка
+EUR_PROFILE_TITLE = "🇪🇺КРОТовыеТОННЕЛИ🇪🇺"
+EUR_SUPPORT_URL = "🇪🇺КРОТовыеТОННЕЛИ🇪🇺"
+EUR_PROFILE_WEB_PAGE_URL = "🇪🇺КРОТовыеТОННЕЛИ🇪🇺"
+
 PROFILE_UPDATE_INTERVAL = "1"
 SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
 
 # ---------- ОСНОВНЫЕ КОНСТАНТЫ ----------
 SOURCES_FILE = "sources.txt"
-OUTPUT_FILE = "subscription.txt"
-OUTPUT_BASE64_FILE = "subscription_base64.txt"
+# Выходные файлы для российской подписки
+OUTPUT_RUS_FILE = "subscription_RUS.txt"
+OUTPUT_RUS_BASE64_FILE = "subscription_RUS_base64.txt"
+# Выходные файлы для европейской подписки
+OUTPUT_EUR_FILE = "subscription_EUR.txt"
+OUTPUT_EUR_BASE64_FILE = "subscription_EUR_base64.txt"
+
 REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 XRAY_CORE_PATH = "xray"
 
 # TCP-проверка (ужесточена)
-TCP_CHECK_TIMEOUT = 5           # было 10, уменьшено для быстрого отсева мёртвых
+TCP_CHECK_TIMEOUT = 5           # было 10
 TCP_MAX_WORKERS = 400
-MAX_LATENCY_MS = 300             # было 500, теперь только быстрые серверы
+MAX_LATENCY_MS = 300             # было 500
 
 # Реальная проверка
 SOCKS_PORT = 8080
@@ -749,44 +762,39 @@ def filter_working_links(links):
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
 
-# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ (С ФЛАГАМИ И ГОРОДАМИ, СНАЧАЛА РОССИЯ) ----------
-def save_working_links(links_with_geo):
-    logging.info(f"💾 Сохраняю {len(links_with_geo)} серверов с геоданными...")
+# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ДЛЯ ГРУППЫ (РОССИЯ ИЛИ ЕВРОПА) ----------
+def save_working_links_group(links_with_geo, filename, title, support_url, web_page_url):
+    """Сохраняет список серверов в файл с заданными заголовками подписки."""
     if not links_with_geo:
-        logging.warning("Нет серверов для сохранения.")
+        logging.warning(f"⚠️ Нет серверов для сохранения в {filename}")
         return 0
 
-    # Сортировка: сначала Россия (RU), потом остальные европейские
-    links_with_geo_sorted = sorted(
-        links_with_geo,
-        key=lambda x: (0 if x[3] == 'RU' else 1)  # x[3] — country_code
-    )
-
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        f.write(f"#profile-title:{PROFILE_TITLE}\n")
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(f"#profile-title:{title}\n")
         f.write(f"#subscription-userinfo:{SUBSCRIPTION_USERINFO}\n")
         f.write(f"#profile-update-interval:{PROFILE_UPDATE_INTERVAL}\n")
-        f.write(f"#support-url:{SUPPORT_URL}\n")
-        f.write(f"#profile-web-page-url:{PROFILE_WEB_PAGE_URL}\n")
-        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo_sorted)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
-        for idx, (link, flag, city, _) in enumerate(links_with_geo_sorted, 1):
+        f.write(f"#support-url:{support_url}\n")
+        f.write(f"#profile-web-page-url:{web_page_url}\n")
+        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
+        for idx, (link, flag, city, _) in enumerate(links_with_geo, 1):
             link_clean = re.sub(r'#.*$', '', link)
             city_part = f" {city}" if city else ""
             tag = f"#🔑📱ТОННЕЛЬ {idx:04d} | {flag}{city_part} |"
             f.write(link_clean + tag + '\n')
 
-    logging.info(f"✅ Сохранено {len(links_with_geo_sorted)} серверов в {OUTPUT_FILE}")
-    return len(links_with_geo_sorted)
+    logging.info(f"✅ Сохранено {len(links_with_geo)} серверов в {filename}")
+    return len(links_with_geo)
 
-def create_base64_subscription():
+def create_base64_subscription_for_file(input_file, output_file):
+    """Создаёт base64-версию указанного файла подписки."""
     try:
-        with open(OUTPUT_FILE, 'rb') as f:
+        with open(input_file, 'rb') as f:
             encoded = base64.b64encode(f.read()).decode('ascii')
-        with open(OUTPUT_BASE64_FILE, 'w', encoding='ascii') as f:
+        with open(output_file, 'w', encoding='ascii') as f:
             f.write(encoded)
-        logging.info(f"💾 Base64-версия сохранена в {OUTPUT_BASE64_FILE}")
+        logging.info(f"💾 Base64-версия сохранена в {output_file}")
     except Exception as e:
-        logging.error(f"❌ Ошибка создания Base64: {e}")
+        logging.error(f"❌ Ошибка создания Base64 для {input_file}: {e}")
 
 def check_xray_available():
     logging.info("🔍 Проверка Xray-core...")
@@ -826,14 +834,37 @@ def main():
     total_checks = len(all_links)
 
     working_links_with_geo = filter_working_links(all_links)
-    written = save_working_links(working_links_with_geo)
 
-    if written > 0:
-        create_base64_subscription()
-    else:
-        logging.warning("Нет серверов с флагами – Base64 не создана.")
+    # Разделяем на российские и европейские
+    rus_links = [item for item in working_links_with_geo if item[3] == 'RU']
+    eur_links = [item for item in working_links_with_geo if item[3] != 'RU']
 
-    logging.info(f"📊 Итог: {len(working_links_with_geo)} рабочих с флагами из {len(all_links)} проверенных")
+    logging.info(f"🇷🇺 Российских серверов: {len(rus_links)}")
+    logging.info(f"🇪🇺 Европейских (кроме РФ) серверов: {len(eur_links)}")
+
+    # Сохраняем российскую подписку
+    written_rus = save_working_links_group(
+        rus_links,
+        OUTPUT_RUS_FILE,
+        RUS_PROFILE_TITLE,
+        RUS_SUPPORT_URL,
+        RUS_PROFILE_WEB_PAGE_URL
+    )
+    if written_rus > 0:
+        create_base64_subscription_for_file(OUTPUT_RUS_FILE, OUTPUT_RUS_BASE64_FILE)
+
+    # Сохраняем европейскую подписку
+    written_eur = save_working_links_group(
+        eur_links,
+        OUTPUT_EUR_FILE,
+        EUR_PROFILE_TITLE,
+        EUR_SUPPORT_URL,
+        EUR_PROFILE_WEB_PAGE_URL
+    )
+    if written_eur > 0:
+        create_base64_subscription_for_file(OUTPUT_EUR_FILE, OUTPUT_EUR_BASE64_FILE)
+
+    logging.info(f"📊 Итог: всего рабочих с флагами: {len(working_links_with_geo)} из {len(all_links)} проверенных")
     logging.info("🏁 Работа завершена")
 
 if __name__ == "__main__":
