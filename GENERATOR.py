@@ -2,8 +2,7 @@
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Ужесточена TCP-проверка: таймаут 5 с, макс. задержка 300 мс.
 # Фильтрация: только Россия и следующие страны Европы: FI, EE, LV, LT, PL, DE, SE, MD, TR.
-# Российские ключи → subscription_RUS.txt и _base64, указанные европейские → subscription_EUR.txt и _base64.
-# Заголовки европейской подписки используют флаг EU.
+# В подписках серверы сортируются по возрастанию задержки (самые быстрые в начале).
 
 import os
 import re
@@ -693,13 +692,13 @@ def filter_working_links(links):
 
     # Определяем флаги и города для прошедших TCP
     logging.info(f"🌍 Определение геоданных для {len(tcp_success)} серверов...")
-    geo_by_link = {}  # link -> (flag, city, country_code)
-    for link, ip, _ in tcp_success:
+    candidates = []  # (link, flag, city, country_code, latency)
+    for link, ip, latency in tcp_success:
         flag, city, country_code = get_geo_info(ip) if ip else ("", "", "")
         if flag:
-            geo_by_link[link] = (flag, city, country_code)
+            candidates.append((link, flag, city, country_code, latency))
 
-    logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
+    logging.info(f"🧾 Серверов с флагами: {len(candidates)}")
 
     # Фильтр: только Россия и Европа (полный список европейских стран)
     european_countries = {
@@ -708,22 +707,24 @@ def filter_working_links(links):
         'MT', 'MD', 'MC', 'ME', 'NL', 'MK', 'NO', 'PL', 'PT', 'RO', 'SM', 'RS',
         'SK', 'SI', 'ES', 'SE', 'CH', 'UA', 'GB', 'VA', 'TR'
     }
-    filtered_geo = {
-        link: data for link, data in geo_by_link.items()
-        if data[2] in european_countries   # data[2] — код страны
-    }
-    logging.info(f"🌍 Российских и европейских (все страны): {len(filtered_geo)}")
+    filtered_candidates = [
+        item for item in candidates if item[3] in european_countries
+    ]
+    logging.info(f"🌍 Российских и европейских (все страны): {len(filtered_candidates)}")
 
-    if not filtered_geo:
+    if not filtered_candidates:
         return []
 
-    # Этап 2: реальная проверка только для filtered_geo
-    logging.info(f"🧪 Этап 2: Реальная проверка {len(filtered_geo)} ссылок...")
-    working_links_with_geo = []  # (link, flag, city, country_code)
-    stage_total = len(filtered_geo)
+    # Словарь для быстрого доступа к информации о кандидате по ссылке
+    candidate_info = {item[0]: item[1:] for item in filtered_candidates}  # link -> (flag, city, country_code, latency)
+
+    # Этап 2: реальная проверка только для filtered_candidates
+    logging.info(f"🧪 Этап 2: Реальная проверка {len(filtered_candidates)} ссылок...")
+    working_links_with_geo = []  # (link, flag, city, country_code, latency)
+    stage_total = len(filtered_candidates)
     stage_current = 0
 
-    links_to_check = list(filtered_geo.keys())
+    links_to_check = [item[0] for item in filtered_candidates]
 
     with ThreadPoolExecutor(max_workers=REAL_CHECK_CONCURRENCY) as executor:
         future_to_link = {executor.submit(check_real, link): link for link in links_to_check}
@@ -748,15 +749,15 @@ def filter_working_links(links):
             else:
                 proto = '?'
 
-            flag, city, country_code = filtered_geo[link]  # из отфильтрованного словаря
+            flag, city, country_code, latency = candidate_info[link]
 
             if is_working:
-                working_links_with_geo.append((link, flag, city, country_code))
+                working_links_with_geo.append((link, flag, city, country_code, latency))
                 emoji = "✅"
             else:
                 emoji = "❌"
 
-            log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short}"
+            log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short} (latency={latency}ms)"
             logging.info(log_msg)
 
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
@@ -764,10 +765,17 @@ def filter_working_links(links):
 
 # ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ДЛЯ ГРУППЫ (РОССИЯ ИЛИ ВЫБРАННЫЕ ЕВРОПЕЙСКИЕ) ----------
 def save_working_links_group(links_with_geo, filename, title, support_url, web_page_url):
-    """Сохраняет список серверов в файл с заданными заголовками подписки."""
+    """
+    Сохраняет список серверов в файл с заданными заголовками подписки.
+    links_with_geo: список кортежей (link, flag, city, country_code, latency)
+    latency используется только для сортировки (самые быстрые в начале)
+    """
     if not links_with_geo:
         logging.warning(f"⚠️ Нет серверов для сохранения в {filename}")
         return 0
+
+    # Сортируем по возрастанию задержки (самые быстрые первые)
+    sorted_links = sorted(links_with_geo, key=lambda x: x[4])  # x[4] — latency
 
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(f"#profile-title:{title}\n")
@@ -775,15 +783,15 @@ def save_working_links_group(links_with_geo, filename, title, support_url, web_p
         f.write(f"#profile-update-interval:{PROFILE_UPDATE_INTERVAL}\n")
         f.write(f"#support-url:{support_url}\n")
         f.write(f"#profile-web-page-url:{web_page_url}\n")
-        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
-        for idx, (link, flag, city, _) in enumerate(links_with_geo, 1):
+        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(sorted_links)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
+        for idx, (link, flag, city, _, _) in enumerate(sorted_links, 1):
             link_clean = re.sub(r'#.*$', '', link)
             city_part = f" {city}" if city else ""
             tag = f"#🔑📱ТОННЕЛЬ {idx:04d} | {flag}{city_part} |"
             f.write(link_clean + tag + '\n')
 
-    logging.info(f"✅ Сохранено {len(links_with_geo)} серверов в {filename}")
-    return len(links_with_geo)
+    logging.info(f"✅ Сохранено {len(sorted_links)} серверов в {filename}")
+    return len(sorted_links)
 
 def create_base64_subscription_for_file(input_file, output_file):
     """Создаёт base64-версию указанного файла подписки."""
@@ -840,8 +848,7 @@ def main():
 
     rus_links = []
     eur_links = []
-    # Остальные (европейские, не входящие в allowed_eur) просто игнорируем
-    for item in working_links_with_geo:
+    for item in working_links_with_geo:  # item = (link, flag, city, country_code, latency)
         cc = item[3]
         if cc == 'RU':
             rus_links.append(item)
