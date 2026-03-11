@@ -16,7 +16,7 @@ jobs:
 
       - name: Cache Xray and GeoIP
         id: cache-xray-geoip
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             xray-core
@@ -29,11 +29,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'          # автоматическое кэширование зависимостей pip
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install geoip2
+          # geoip2 уже должен быть в requirements.txt, иначе добавьте его туда
 
       - name: Download Xray-core (if not cached)
         if: steps.cache-xray-geoip.outputs.cache-hit != 'true'
@@ -41,14 +42,15 @@ jobs:
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           unzip -q Xray-linux-64.zip -d xray-core
           chmod +x xray-core/xray
+          rm -f Xray-linux-64.zip
 
       - name: Add Xray to PATH
         run: echo "$(pwd)/xray-core" >> $GITHUB_PATH
 
-      - name: Download GeoIP database (if not cached)
-        if: steps.cache-xray-geoip.outputs.cache-hit != 'true'
+      - name: Show versions
         run: |
-          wget -q https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb
+          python --version
+          xray --version || true
 
       - name: Run GENERATOR.py
         run: python GENERATOR.py
@@ -62,6 +64,6 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Auto-update subscription files"
-            git pull --rebase origin main
-            git push
+            # Прямой push, так как эти файлы меняются только этим workflow
+            git push origin HEAD:main
           fi
