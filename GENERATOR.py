@@ -71,7 +71,7 @@ XRAY_CORE_PATH = "xray"
 # TCP-проверка
 TCP_CHECK_TIMEOUT = 10
 TCP_MAX_WORKERS = 300
-MAX_LATENCY_MS = 150  # снижено с 200 для отсева медленных серверов
+MAX_LATENCY_MS = 200  # снижено с 200 для отсева медленных серверов
 
 # Реальная проверка
 SOCKS_PORT = 8080
