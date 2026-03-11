@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Добавлена фильтрация: только российские и европейские серверы.
-# Остальная логика без изменений.
+# В подписке сначала российские ключи, потом европейские.
 
 import os
 import re
@@ -708,7 +708,7 @@ def filter_working_links(links):
 
     # Этап 2: реальная проверка только для filtered_geo
     logging.info(f"🧪 Этап 2: Реальная проверка {len(filtered_geo)} ссылок...")
-    working_links_with_geo = []  # (link, flag, city)
+    working_links_with_geo = []  # (link, flag, city, country_code)
     stage_total = len(filtered_geo)
     stage_current = 0
 
@@ -737,10 +737,10 @@ def filter_working_links(links):
             else:
                 proto = '?'
 
-            flag, city, _ = filtered_geo[link]  # из отфильтрованного словаря
+            flag, city, country_code = filtered_geo[link]  # из отфильтрованного словаря
 
             if is_working:
-                working_links_with_geo.append((link, flag, city))
+                working_links_with_geo.append((link, flag, city, country_code))
                 emoji = "✅"
             else:
                 emoji = "❌"
@@ -751,12 +751,18 @@ def filter_working_links(links):
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
 
-# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ (С ФЛАГАМИ И ГОРОДАМИ) ----------
+# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ (С ФЛАГАМИ И ГОРОДАМИ, СНАЧАЛА РОССИЯ) ----------
 def save_working_links(links_with_geo):
     logging.info(f"💾 Сохраняю {len(links_with_geo)} серверов с геоданными...")
     if not links_with_geo:
         logging.warning("Нет серверов для сохранения.")
         return 0
+
+    # Сортировка: сначала Россия (RU), потом остальные европейские
+    links_with_geo_sorted = sorted(
+        links_with_geo,
+        key=lambda x: (0 if x[3] == 'RU' else 1)  # x[3] — country_code
+    )
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         f.write(f"#profile-title:{PROFILE_TITLE}\n")
@@ -764,15 +770,15 @@ def save_working_links(links_with_geo):
         f.write(f"#profile-update-interval:{PROFILE_UPDATE_INTERVAL}\n")
         f.write(f"#support-url:{SUPPORT_URL}\n")
         f.write(f"#profile-web-page-url:{PROFILE_WEB_PAGE_URL}\n")
-        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
-        for idx, (link, flag, city) in enumerate(links_with_geo, 1):
+        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo_sorted)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
+        for idx, (link, flag, city, _) in enumerate(links_with_geo_sorted, 1):
             link_clean = re.sub(r'#.*$', '', link)
             city_part = f" {city}" if city else ""
             tag = f"#🔑📱ТОННЕЛЬ {idx:04d} | {flag}{city_part} |"
             f.write(link_clean + tag + '\n')
 
-    logging.info(f"✅ Сохранено {len(links_with_geo)} серверов в {OUTPUT_FILE}")
-    return len(links_with_geo)
+    logging.info(f"✅ Сохранено {len(links_with_geo_sorted)} серверов в {OUTPUT_FILE}")
+    return len(links_with_geo_sorted)
 
 def create_base64_subscription():
     try:
