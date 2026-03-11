@@ -14,35 +14,50 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Cache Xray and GeoIP
-        id: cache-xray-geoip
+      # Кэш для Xray-core (зависит от изменений в GENERATOR.py)
+      - name: Cache Xray-core
+        id: cache-xray
         uses: actions/cache@v4
         with:
-          path: |
-            xray-core
-            GeoLite2-City.mmdb
-          key: ${{ runner.os }}-xray-geoip-${{ hashFiles('GENERATOR.py') }}
+          path: xray-core
+          key: ${{ runner.os }}-xray-${{ hashFiles('GENERATOR.py') }}
           restore-keys: |
-            ${{ runner.os }}-xray-geoip-
+            ${{ runner.os }}-xray-
+
+      # Кэш для GeoIP (обновляется раз в месяц или при изменении ключа вручную)
+      - name: Cache GeoIP database
+        id: cache-geoip
+        uses: actions/cache@v4
+        with:
+          path: GeoLite2-City.mmdb
+          # Ключ можно обновлять раз в месяц, например: 2026-03-01
+          key: ${{ runner.os }}-geoip-2026-03-01
+          restore-keys: |
+            ${{ runner.os }}-geoip-
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'          # автоматическое кэширование зависимостей pip
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # geoip2 уже должен быть в requirements.txt, иначе добавьте его туда
+          # geoip2 уже должен быть в requirements.txt
 
       - name: Download Xray-core (if not cached)
-        if: steps.cache-xray-geoip.outputs.cache-hit != 'true'
+        if: steps.cache-xray.outputs.cache-hit != 'true'
         run: |
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           unzip -q Xray-linux-64.zip -d xray-core
           chmod +x xray-core/xray
           rm -f Xray-linux-64.zip
+
+      - name: Download GeoIP database (if not cached)
+        if: steps.cache-geoip.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb
 
       - name: Add Xray to PATH
         run: echo "$(pwd)/xray-core" >> $GITHUB_PATH
@@ -51,6 +66,7 @@ jobs:
         run: |
           python --version
           xray --version || true
+          ls -lh GeoLite2-City.mmdb || echo "GeoIP not found"
 
       - name: Run GENERATOR.py
         run: python GENERATOR.py
@@ -64,6 +80,5 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Auto-update subscription files"
-            # Прямой push, так как эти файлы меняются только этим workflow
             git push origin HEAD:main
           fi
