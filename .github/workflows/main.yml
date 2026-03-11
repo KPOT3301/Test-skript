@@ -39,9 +39,6 @@ jobs:
           chmod +x xray-core/xray
           echo "$(pwd)/xray-core" >> $GITHUB_PATH
 
-      - name: Pull latest changes
-        run: git pull --rebase origin main
-
       - name: Run GENERATOR.py
         run: python GENERATOR.py
 
@@ -54,5 +51,6 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Auto-update subscription files"
+            git pull --rebase origin main
             git push
           fi
