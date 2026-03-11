@@ -7,6 +7,8 @@
 # Дедупликация по IP выполняется перед реальной проверкой (остаётся сервер с наименьшей задержкой).
 # Замер времени HTTP/HTTPS запросов и отсев медленных.
 # Расширен список тестовых URL.
+# В announce добавлено точное время с секундами, чтобы гарантировать обновление файлов.
+# Заголовки подписок: российская и для других стран (с эмодзи 🌍).
 
 import os
 import re
@@ -50,7 +52,7 @@ try:
     LOCAL_NOW = datetime.now(ZoneInfo(TIMEZONE))
 except ImportError:
     LOCAL_NOW = datetime.utcnow()
-TODAY_STR = LOCAL_NOW.strftime("%d-%m-%Y")
+TIMESTAMP = LOCAL_NOW.strftime("%d-%m-%Y %H:%M:%S")
 
 import requests
 
@@ -73,9 +75,9 @@ GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/G
 RUS_PROFILE_TITLE = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 RUS_SUPPORT_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 RUS_PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
-OTHER_PROFILE_TITLE = "🌍 Другие страны (не РФ)"
-OTHER_SUPPORT_URL = "🌍 Другие страны (не РФ)"
-OTHER_PROFILE_WEB_PAGE_URL = "🌍 Другие страны (не РФ)"
+OTHER_PROFILE_TITLE = "🌍КРОТовыеТОННЕЛИ🌍"
+OTHER_SUPPORT_URL = "🌍КРОТовыеТОННЕЛИ🌍"
+OTHER_PROFILE_WEB_PAGE_URL = "🌍КРОТовыеТОННЕЛИ🌍"
 
 PROFILE_UPDATE_INTERVAL = "1"
 SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
@@ -247,7 +249,7 @@ def gather_all_links(sources):
     logging.info(f"🎯 Всего уникальных ссылок: {len(all_links)}")
     return list(all_links)
 
-# ---------- ПАРСЕРЫ (оставлены как в предыдущей версии) ----------
+# ---------- ПАРСЕРЫ ----------
 def parse_vless_link(link):
     try:
         without_proto = link[8:]
@@ -852,7 +854,7 @@ def save_working_links_group(links_with_geo, filename, title, support_url, web_p
         f.write(f"#profile-update-interval:{PROFILE_UPDATE_INTERVAL}\n")
         f.write(f"#support-url:{support_url}\n")
         f.write(f"#profile-web-page-url:{web_page_url}\n")
-        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(sorted_links)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
+        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(sorted_links)} | ОБНОВЛЕНО 📅 {TIMESTAMP}\n")
         for idx, (link, flag, city, _, _, _) in enumerate(sorted_links, 1):
             link_clean = re.sub(r'#.*$', '', link)
             city_part = f" {city}" if city else ""
