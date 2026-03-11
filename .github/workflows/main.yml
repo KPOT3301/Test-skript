@@ -12,7 +12,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # нужна полная история для корректного pull/rebase
+          fetch-depth: 0
+
+      - name: Cache Xray and GeoIP
+        id: cache-xray-geoip
+        uses: actions/cache@v3
+        with:
+          path: |
+            xray-core
+            GeoLite2-City.mmdb
+          key: ${{ runner.os }}-xray-geoip-${{ hashFiles('GENERATOR.py') }}
+          restore-keys: |
+            ${{ runner.os }}-xray-geoip-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,12 +35,20 @@ jobs:
           pip install -r requirements.txt
           pip install geoip2
 
-      - name: Download Xray-core
+      - name: Download Xray-core (if not cached)
+        if: steps.cache-xray-geoip.outputs.cache-hit != 'true'
         run: |
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           unzip -q Xray-linux-64.zip -d xray-core
           chmod +x xray-core/xray
-          echo "$(pwd)/xray-core" >> $GITHUB_PATH
+
+      - name: Add Xray to PATH
+        run: echo "$(pwd)/xray-core" >> $GITHUB_PATH
+
+      - name: Download GeoIP database (if not cached)
+        if: steps.cache-xray-geoip.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb
 
       - name: Run GENERATOR.py
         run: python GENERATOR.py
@@ -46,4 +65,3 @@ jobs:
             git pull --rebase origin main
             git push
           fi
-          
