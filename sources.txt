@@ -1,0 +1,79 @@
+# MELVPN
+https://raw.githubusercontent.com/MELVPNBOT/MELVPN/refs/heads/main/configs.txt?clckid=d3d11258
+
+# kort0881
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_all_part1.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_all_part2.txt
+
+# allvpn
+http://allvpn.x10.mx/sub.php
+
+# лайм
+https://raw.githubusercontent.com/LimeHi/LimeVPN/refs/heads/main/LimeVPN.txt?v=1
+
+# ZipVPN
+https://raw.githubusercontent.com/zipvpn/FreeVPNNodes/refs/heads/main/free_v2ray_xray_nodes.txt
+
+# Отдельная ссылка с 10 конфигами
+https://gbr.mydan.online/configs
+
+# 🔴 BLACKLIST
+https://raw.githubusercontent.com/55prosek-lgtm/vpn_config_for_russia/refs/heads/main/blacklist.txt
+
+# BLACK VLESS (RUS)
+https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS.txt
+
+# ConfigForge V2Ray
+https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/all.txt
+
+# vpn-configs-for-russia
+https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt
+
+# против блокировок
+https://raw.githubusercontent.com/cinev505/VlessTrogan-vpn-key/refs/heads/main/All-keys
+#KFWL
+https://gist.githubusercontent.com/sevushyamamoto-stack/9341be7a058e132154d407d082a60fb1/raw/mysub.txt
+
+# LiVPN
+https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt
+http://livpnsub.dpdns.org/sub.php?token=3d13acae01d6cbeb
+
+# Подписка для ЧС 
+https://vpnd.io/subscription/vless/ba802473859338c0571a13d2c974a826b52b54e0ad29d37ab9e982a90d2f6489
+
+# РОСТУНЕЛЬ
+https://subrostunnel.vercel.app/std.txt
+
+# Махса 👍
+https://raw.githubusercontent.com/MahsaNetConfigTopic/config/refs/heads/main/xray_final.txt
+
+# 🥭 КIЗЯК VPN 🥭
+https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyakbeta6.txt
+https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyakbeta6BL.txt
+https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyaktestru.txt
+
+# это не я
+https://alley.serv00.net/1
+https://raw.githubusercontent.com/EtoNeYaProject/etoneyaproject.github.io/refs/heads/main/youtube
+
+# доступ к интернету
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_part1.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_part2.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_part3.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_all_part1.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_all_part2.txt
+
+# топ 100
+https://raw.githubusercontent.com/VP01596/vless-top15/refs/heads/main/top100.txt
+
+# juju
+https://github.com/WSJuJuB01/urban-succotash/releases/download/WS_VPN/NOTHINGV5.txt
+
+# WL RUS
+https://wlrus.lol/confs/blackl.txt
+
+# niyakwi
+https://raw.githubusercontent.com/Niyakwi/Vpn-config.txt/main/VPN.txt
+
+# черные списки
+https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS+All_RUS.txt
