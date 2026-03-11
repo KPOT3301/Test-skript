@@ -2,6 +2,10 @@
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Все основные настройки вынесены в начало для удобства.
 # Добавлен случайный выбор User-Agent из списка популярных.
+# Добавлена статистика по источникам: сколько ссылок получено из каждого.
+# На этапе TCP-проверки добавлена проверка SNI: если у ключа есть explicit_sni,
+# то этот домен должен разрешаться в IP (иначе ключ отбрасывается).
+# Фильтрация: все сервера с флагом, разделение на российские и остальные.
 
 import os
 import re
@@ -68,9 +72,9 @@ GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/G
 RUS_PROFILE_TITLE = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 RUS_SUPPORT_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 RUS_PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
-EUR_PROFILE_TITLE = "🇪🇺КРОТовыеТОННЕЛИ🇪🇺"
-EUR_SUPPORT_URL = "🇪🇺КРОТовыеТОННЕЛИ🇪🇺"
-EUR_PROFILE_WEB_PAGE_URL = "🇪🇺КРОТовыеТОННЕЛИ🇪🇺"
+OTHER_PROFILE_TITLE = "🌍 Другие страны (не РФ)"
+OTHER_SUPPORT_URL = "🌍 Другие страны (не РФ)"
+OTHER_PROFILE_WEB_PAGE_URL = "🌍 Другие страны (не РФ)"
 
 PROFILE_UPDATE_INTERVAL = "1"
 SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
@@ -79,8 +83,8 @@ SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
 SOURCES_FILE = "sources.txt"
 OUTPUT_RUS_FILE = "subscription_RUS.txt"
 OUTPUT_RUS_BASE64_FILE = "subscription_RUS_base64.txt"
-OUTPUT_EUR_FILE = "subscription_EUR.txt"
-OUTPUT_EUR_BASE64_FILE = "subscription_EUR_base64.txt"
+OUTPUT_OTHER_FILE = "subscription_OTHER.txt"
+OUTPUT_OTHER_BASE64_FILE = "subscription_OTHER_base64.txt"
 
 # ---------- Общие сетевые настройки ----------
 REQUEST_TIMEOUT = 10
@@ -101,14 +105,14 @@ USER_AGENTS = [
 # ---------- TCP-проверка (этап 1) ----------
 TCP_CHECK_TIMEOUT = 5           # таймаут соединения, секунд
 TCP_MAX_WORKERS = 400            # количество параллельных потоков
-MAX_LATENCY_MS = 200             # максимальная допустимая TCP-задержка (мс)
-TCP_ATTEMPTS = 5                 # количество попыток TCP-соединения
+MAX_LATENCY_MS = 300             # максимальная допустимая TCP-задержка (мс)
+TCP_ATTEMPTS = 3                 # количество попыток TCP-соединения
 
 # ---------- Реальная проверка через Xray (этап 2) ----------
-REAL_CHECK_TIMEOUT = 5         # таймаут HTTP/HTTPS запросов (секунд)
-REAL_CHECK_CONCURRENCY = 30       # параллельных проверок Xray
+REAL_CHECK_TIMEOUT = 15          # таймаут HTTP/HTTPS запросов (секунд)
+REAL_CHECK_CONCURRENCY = 20       # параллельных проверок Xray
 REAL_CHECK_ATTEMPTS = 1           # количество попыток реальной проверки
-MAX_HTTP_LATENCY_MS = 200        # максимальная задержка HTTP (мс) – отсев медленных
+MAX_HTTP_LATENCY_MS = 1000        # максимальная задержка HTTP (мс) – отсев медленных
 
 # ---------- Тестовые URL для проверки ----------
 TEST_HTTP_URLS = [
@@ -129,9 +133,6 @@ DOH_HEADERS = {"Accept": "application/dns-json"}
 # ---------- Диапазон локальных портов для SOCKS (динамическое выделение) ----------
 SOCKS_PORT_START = 10000
 SOCKS_PORT_END = 11000
-
-# ---------- Гео-фильтр: разрешённые европейские страны ----------
-ALLOWED_EUR_COUNTRIES = {'FI', 'EE', 'LV', 'LT', 'PL', 'DE', 'SE', 'MD', 'TR'}
 
 # =============================================================================
 #                          КОНЕЦ НАСТРОЕК
@@ -216,22 +217,33 @@ def decode_base64_content(encoded):
 
 def gather_all_links(sources):
     all_links = set()
+    source_stats = []  # список кортежей (источник, количество ссылок)
     for idx, src in enumerate(sources, 1):
         if src.startswith(('vless://', 'ss://', 'trojan://', 'vmess://', 'hysteria2://', 'hy2://')):
             all_links.add(src)
+            source_stats.append((src[:60], 1))  # обрезаем для красоты
             continue
         content = fetch_content(src)
         if not content:
+            source_stats.append((src[:60], 0))
             continue
         decoded = decode_base64_content(content)
         links = extract_links_from_text(content)
         if decoded != content:
             links.extend(extract_links_from_text(decoded))
-        for link in links:
+        unique_from_source = set(links)
+        for link in unique_from_source:
             all_links.add(link)
+        source_stats.append((src[:60], len(unique_from_source)))
+        logging.info(f"🔗 [{idx}/{len(sources)}] {src[:60]}... получено {len(unique_from_source)} ссылок")
+    # Выводим сводку по источникам
+    logging.info("📊 Статистика по источникам:")
+    for src, cnt in source_stats:
+        logging.info(f"   {src}: {cnt} ссылок")
+    logging.info(f"🎯 Всего уникальных ссылок: {len(all_links)}")
     return list(all_links)
 
-# ---------- Парсеры (полные, как в предыдущих версиях) ----------
+# ---------- ПАРСЕРЫ (полные, как в предыдущих версиях) ----------
 def parse_vless_link(link):
     try:
         without_proto = link[8:]
@@ -593,14 +605,23 @@ def create_xray_config(config, socks_port):
     base_config["outbounds"].append(outbound)
     return base_config
 
-# ---------- TCP ПРОВЕРКА (3 попытки) ----------
+# ---------- TCP ПРОВЕРКА (3 попытки + проверка SNI) ----------
 def check_tcp(link):
     parsed = parse_link(link)
     if not parsed:
         return (link, False, None, None)
     host, port = parsed['host'], parsed['port']
+    explicit_sni = parsed.get('explicit_sni')
     try:
         ip = resolve_host(host)
+        # Если у ключа есть explicit_sni и это не IP (проверим, что содержит буквы), проверяем его разрешимость
+        if explicit_sni:
+            # Простая проверка: если в SNI есть хотя бы одна буква, считаем доменом
+            if re.search(r'[a-zA-Z]', explicit_sni):
+                try:
+                    resolve_host(explicit_sni)
+                except socket.gaierror:
+                    return (link, False, None, None)
         latencies = []
         for _ in range(TCP_ATTEMPTS):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -618,7 +639,7 @@ def check_tcp(link):
     except:
         return (link, False, None, None)
 
-# ---------- РЕАЛЬНАЯ ПРОВЕРКА (3 попытки, но REAL_CHECK_ATTEMPTS теперь 1) ----------
+# ---------- РЕАЛЬНАЯ ПРОВЕРКА (одна попытка) ----------
 def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
@@ -752,24 +773,16 @@ def filter_working_links(links):
     candidates = []
     for link, ip, latency in tcp_success:
         flag, city, country_code = get_geo_info(ip) if ip else ("", "", "")
-        if flag:
+        if flag:  # сохраняем только те, для которых определилась страна
             candidates.append((link, flag, city, country_code, latency))
 
-    # Фильтр по гео (Россия + Европа)
-    european_countries = {
-        'RU', 'AL', 'AD', 'AT', 'BY', 'BE', 'BA', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE',
-        'FI', 'FR', 'DE', 'GR', 'HU', 'IS', 'IE', 'IT', 'LV', 'LI', 'LT', 'LU',
-        'MT', 'MD', 'MC', 'ME', 'NL', 'MK', 'NO', 'PL', 'PT', 'RO', 'SM', 'RS',
-        'SK', 'SI', 'ES', 'SE', 'CH', 'UA', 'GB', 'VA', 'TR'
-    }
-    filtered_candidates = [c for c in candidates if c[3] in european_countries]
-    logging.info(f"🌍 Российских и европейских: {len(filtered_candidates)}")
+    logging.info(f"🧾 Серверов с флагами: {len(candidates)}")
 
-    if not filtered_candidates:
+    if not candidates:
         return []
 
-    candidate_info = {c[0]: c[1:] for c in filtered_candidates}
-    links_to_check = [c[0] for c in filtered_candidates]
+    candidate_info = {c[0]: c[1:] for c in candidates}
+    links_to_check = [c[0] for c in candidates]
     total_to_check = len(links_to_check)
     processed = 0
 
@@ -800,7 +813,7 @@ def filter_working_links(links):
 def save_working_links_group(links_with_geo, filename, title, support_url, web_page_url):
     if not links_with_geo:
         return 0
-    sorted_links = sorted(links_with_geo, key=lambda x: x[4])
+    sorted_links = sorted(links_with_geo, key=lambda x: x[4])  # сортировка по TCP-задержке
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(f"#profile-title:{title}\n")
         f.write(f"#subscription-userinfo:{SUBSCRIPTION_USERINFO}\n")
@@ -847,7 +860,6 @@ def main():
         return
 
     all_links = gather_all_links(sources)
-    logging.info(f"📦 Всего уникальных ссылок: {len(all_links)}")
     if not all_links:
         return
 
@@ -857,11 +869,12 @@ def main():
 
     working_links_with_geo = filter_working_links(all_links)
 
+    # Разделяем на российские и остальные
     rus_links = [item for item in working_links_with_geo if item[3] == 'RU']
-    eur_links = [item for item in working_links_with_geo if item[3] in ALLOWED_EUR_COUNTRIES and item[3] != 'RU']
+    other_links = [item for item in working_links_with_geo if item[3] != 'RU']
 
     logging.info(f"🇷🇺 Российских серверов: {len(rus_links)}")
-    logging.info(f"🇪🇺 Европейских (FI, EE, LV, LT, PL, DE, SE, MD, TR): {len(eur_links)}")
+    logging.info(f"🌍 Остальных серверов: {len(other_links)}")
 
     written_rus = save_working_links_group(
         rus_links, OUTPUT_RUS_FILE, RUS_PROFILE_TITLE, RUS_SUPPORT_URL, RUS_PROFILE_WEB_PAGE_URL
@@ -870,14 +883,14 @@ def main():
         logging.info(f"✅ Сохранено {written_rus} российских серверов в {OUTPUT_RUS_FILE}")
         create_base64_subscription_for_file(OUTPUT_RUS_FILE, OUTPUT_RUS_BASE64_FILE)
 
-    written_eur = save_working_links_group(
-        eur_links, OUTPUT_EUR_FILE, EUR_PROFILE_TITLE, EUR_SUPPORT_URL, EUR_PROFILE_WEB_PAGE_URL
+    written_other = save_working_links_group(
+        other_links, OUTPUT_OTHER_FILE, OTHER_PROFILE_TITLE, OTHER_SUPPORT_URL, OTHER_PROFILE_WEB_PAGE_URL
     )
-    if written_eur > 0:
-        logging.info(f"✅ Сохранено {written_eur} европейских серверов в {OUTPUT_EUR_FILE}")
-        create_base64_subscription_for_file(OUTPUT_EUR_FILE, OUTPUT_EUR_BASE64_FILE)
+    if written_other > 0:
+        logging.info(f"✅ Сохранено {written_other} серверов других стран в {OUTPUT_OTHER_FILE}")
+        create_base64_subscription_for_file(OUTPUT_OTHER_FILE, OUTPUT_OTHER_BASE64_FILE)
 
-    total_saved = written_rus + written_eur
+    total_saved = written_rus + written_other
     logging.info(f"📊 Всего сохранено ключей: {total_saved}")
 
 if __name__ == "__main__":
