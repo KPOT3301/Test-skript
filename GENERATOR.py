@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Ужесточена TCP-проверка: таймаут 5 с, макс. задержка 300 мс.
-# Фильтрация: только Россия и Европа.
-# Результат разделяется: российские ключи → subscription_RUS.txt и _base64, европейские → subscription_EUR.txt и _base64.
+# Фильтрация: только Россия и следующие страны Европы: FI, EE, LV, LT, PL, DE, SE, MD, TR.
+# Российские ключи → subscription_RUS.txt и _base64, указанные европейские → subscription_EUR.txt и _base64.
 # Заголовки европейской подписки используют флаг EU.
 
 import os
@@ -60,7 +60,7 @@ except ImportError:
 RUS_PROFILE_TITLE = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 RUS_SUPPORT_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 RUS_PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
-# Европейская подписка
+# Европейская подписка (только указанные страны)
 EUR_PROFILE_TITLE = "🇪🇺КРОТовыеТОННЕЛИ🇪🇺"
 EUR_SUPPORT_URL = "🇪🇺КРОТовыеТОННЕЛИ🇪🇺"
 EUR_PROFILE_WEB_PAGE_URL = "🇪🇺КРОТовыеТОННЕЛИ🇪🇺"
@@ -73,7 +73,7 @@ SOURCES_FILE = "sources.txt"
 # Выходные файлы для российской подписки
 OUTPUT_RUS_FILE = "subscription_RUS.txt"
 OUTPUT_RUS_BASE64_FILE = "subscription_RUS_base64.txt"
-# Выходные файлы для европейской подписки
+# Выходные файлы для европейской подписки (выбранные страны)
 OUTPUT_EUR_FILE = "subscription_EUR.txt"
 OUTPUT_EUR_BASE64_FILE = "subscription_EUR_base64.txt"
 
@@ -701,7 +701,7 @@ def filter_working_links(links):
 
     logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
 
-    # Фильтр: только Россия и Европа
+    # Фильтр: только Россия и Европа (полный список европейских стран)
     european_countries = {
         'RU', 'AL', 'AD', 'AT', 'BY', 'BE', 'BA', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE',
         'FI', 'FR', 'DE', 'GR', 'HU', 'IS', 'IE', 'IT', 'LV', 'LI', 'LT', 'LU',
@@ -712,7 +712,7 @@ def filter_working_links(links):
         link: data for link, data in geo_by_link.items()
         if data[2] in european_countries   # data[2] — код страны
     }
-    logging.info(f"🌍 Российских и европейских: {len(filtered_geo)}")
+    logging.info(f"🌍 Российских и европейских (все страны): {len(filtered_geo)}")
 
     if not filtered_geo:
         return []
@@ -762,7 +762,7 @@ def filter_working_links(links):
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
 
-# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ДЛЯ ГРУППЫ (РОССИЯ ИЛИ ЕВРОПА) ----------
+# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ДЛЯ ГРУППЫ (РОССИЯ ИЛИ ВЫБРАННЫЕ ЕВРОПЕЙСКИЕ) ----------
 def save_working_links_group(links_with_geo, filename, title, support_url, web_page_url):
     """Сохраняет список серверов в файл с заданными заголовками подписки."""
     if not links_with_geo:
@@ -835,12 +835,22 @@ def main():
 
     working_links_with_geo = filter_working_links(all_links)
 
-    # Разделяем на российские и европейские
-    rus_links = [item for item in working_links_with_geo if item[3] == 'RU']
-    eur_links = [item for item in working_links_with_geo if item[3] != 'RU']
+    # Множество стран, которые попадают в европейскую подписку
+    allowed_eur_countries = {'FI', 'EE', 'LV', 'LT', 'PL', 'DE', 'SE', 'MD', 'TR'}
+
+    rus_links = []
+    eur_links = []
+    # Остальные (европейские, не входящие в allowed_eur) просто игнорируем
+    for item in working_links_with_geo:
+        cc = item[3]
+        if cc == 'RU':
+            rus_links.append(item)
+        elif cc in allowed_eur_countries:
+            eur_links.append(item)
+        # else: пропускаем
 
     logging.info(f"🇷🇺 Российских серверов: {len(rus_links)}")
-    logging.info(f"🇪🇺 Европейских (кроме РФ) серверов: {len(eur_links)}")
+    logging.info(f"🇪🇺 Европейских (FI, EE, LV, LT, PL, DE, SE, MD, TR) серверов: {len(eur_links)}")
 
     # Сохраняем российскую подписку
     written_rus = save_working_links_group(
@@ -864,7 +874,8 @@ def main():
     if written_eur > 0:
         create_base64_subscription_for_file(OUTPUT_EUR_FILE, OUTPUT_EUR_BASE64_FILE)
 
-    logging.info(f"📊 Итог: всего рабочих с флагами: {len(working_links_with_geo)} из {len(all_links)} проверенных")
+    total_saved = written_rus + written_eur
+    logging.info(f"📊 Итог: всего рабочих с флагами: {len(working_links_with_geo)} из {len(all_links)} проверенных, сохранено: {total_saved}")
     logging.info("🏁 Работа завершена")
 
 if __name__ == "__main__":
