@@ -832,4 +832,55 @@ def create_base64_subscription():
             f.write(encoded)
         logging.info(f"💾 Base64-версия сохранена в {OUTPUT_BASE64_FILE}")
     except Exception as e:
-        logging.error(f"❌ Ошибка создания Base64: {
+        logging.error(f"❌ Ошибка создания Base64: {e}")
+
+def check_xray_available():
+    logging.info("🔍 Проверка Xray-core...")
+    try:
+        result = subprocess.run([XRAY_CORE_PATH, '--version'], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            logging.info(f"✅ Xray-core: {result.stdout.splitlines()[0]}")
+            return True
+        else:
+            logging.warning("⚠️ Xray-core не отвечает")
+            return False
+    except FileNotFoundError:
+        logging.error(f"❌ Xray-core не найден по пути '{XRAY_CORE_PATH}'")
+        return False
+    except Exception as e:
+        logging.error(f"❌ Ошибка проверки Xray: {e}")
+        return False
+
+# ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
+def main():
+    global record_counter, current_check, total_checks
+    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, Xray=15с, отсев по TCP latency, многократная TCP-проверка 10 раз)")
+    if not check_xray_available():
+        logging.error("Xray-core обязателен. Завершение.")
+        return
+
+    sources = read_sources()
+    if not sources:
+        return
+
+    all_links = gather_all_links(sources)
+    if not all_links:
+        return
+
+    record_counter = 0
+    current_check = 0
+    total_checks = len(all_links)
+
+    working_links_with_geo = filter_working_links(all_links)
+    written = save_working_links(working_links_with_geo)
+
+    if written > 0:
+        create_base64_subscription()
+    else:
+        logging.warning("Нет серверов с флагами – Base64 не создана.")
+
+    logging.info(f"📊 Итог: {len(working_links_with_geo)} рабочих с флагами из {len(all_links)} проверенных")
+    logging.info("🏁 Работа завершена")
+
+if __name__ == "__main__":
+    main()
