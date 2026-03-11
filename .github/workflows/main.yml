@@ -30,7 +30,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # geoip2 уже должен быть в requirements.txt, но на всякий случай
           pip install geoip2
 
       - name: Download Xray-core
@@ -47,8 +46,8 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          # Добавляем новые файлы подписок (российские и европейские)
-          git add subscription_RUS.txt subscription_RUS_base64.txt subscription_EUR.txt subscription_EUR_base64.txt
+          # Добавляем файлы подписок (российские и остальные)
+          git add subscription_RUS.txt subscription_RUS_base64.txt subscription_OTHER.txt subscription_OTHER_base64.txt
           # Проверяем, есть ли изменения для коммита
           if git diff --cached --quiet; then
             echo "No changes to commit"
