@@ -2,3 +2,4 @@ requests
 pysocks
 geoip2
 tzdata
+ping3
