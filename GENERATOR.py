@@ -8,9 +8,9 @@ import subprocess
 import tempfile
 import os
 import logging
+import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
 
 # =========================
 # CONFIG
@@ -21,8 +21,11 @@ TCP_TIMEOUT = 3
 TLS_TIMEOUT = 3
 
 INPUT_FILE = "sources.txt"
+
 OUTPUT_TXT = "subscription.txt"
 OUTPUT_BASE64 = "subscription_base64.txt"
+
+GEOIP_API = "http://ip-api.com/json/"
 
 # =========================
 # LOGGING
@@ -34,20 +37,32 @@ logging.basicConfig(
 )
 
 # =========================
+# FLAG DATABASE
+# =========================
+
+country_flags = {
+"DE":"🇩🇪","FI":"🇫🇮","US":"🇺🇸","GB":"🇬🇧","NL":"🇳🇱","FR":"🇫🇷",
+"CA":"🇨🇦","RU":"🇷🇺","JP":"🇯🇵","SG":"🇸🇬","KR":"🇰🇷","HK":"🇭🇰",
+"TR":"🇹🇷","UA":"🇺🇦","PL":"🇵🇱","CZ":"🇨🇿","IT":"🇮🇹","ES":"🇪🇸"
+}
+
+flag_regex = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
+
+# =========================
 # DOWNLOAD SUBSCRIPTIONS
 # =========================
 
 def download_subscription(url):
 
     try:
-        r = requests.get(url, timeout=15)
+
+        r = requests.get(url,timeout=20)
 
         if r.status_code != 200:
             return []
 
         text = r.text.strip()
 
-        # base64 subscription
         try:
             decoded = base64.b64decode(text).decode()
             if "://" in decoded:
@@ -57,43 +72,8 @@ def download_subscription(url):
 
         return text.splitlines()
 
-    except Exception:
+    except:
         return []
-
-
-# =========================
-# TCP TEST
-# =========================
-
-def tcp_check(host, port):
-
-    try:
-        sock = socket.create_connection((host, port), TCP_TIMEOUT)
-        sock.close()
-        return True
-    except:
-        return False
-
-
-# =========================
-# TLS HANDSHAKE
-# =========================
-
-def tls_check(host, port):
-
-    try:
-
-        context = ssl.create_default_context()
-
-        sock = socket.create_connection((host, port), TLS_TIMEOUT)
-        ssock = context.wrap_socket(sock, server_hostname=host)
-
-        ssock.close()
-
-        return True
-
-    except:
-        return False
 
 
 # =========================
@@ -105,17 +85,110 @@ def parse_host_port(link):
     try:
 
         if "@" not in link:
-            return None, None
+            return None,None
 
         part = link.split("@")[1]
 
         host = part.split(":")[0]
         port = int(part.split(":")[1].split("?")[0])
 
-        return host, port
+        return host,port
 
     except:
-        return None, None
+        return None,None
+
+
+# =========================
+# TCP CHECK
+# =========================
+
+def tcp_check(host,port):
+
+    try:
+
+        sock = socket.create_connection((host,port),TCP_TIMEOUT)
+
+        sock.close()
+
+        return True
+
+    except:
+
+        return False
+
+
+# =========================
+# TLS CHECK
+# =========================
+
+def tls_check(host,port):
+
+    try:
+
+        context = ssl.create_default_context()
+
+        sock = socket.create_connection((host,port),TLS_TIMEOUT)
+
+        ssock = context.wrap_socket(sock,server_hostname=host)
+
+        ssock.close()
+
+        return True
+
+    except:
+
+        return False
+
+
+# =========================
+# GEOIP
+# =========================
+
+def get_country_flag(ip):
+
+    try:
+
+        r = requests.get(GEOIP_API+ip,timeout=5)
+
+        data = r.json()
+
+        code = data.get("countryCode")
+
+        if code in country_flags:
+
+            return country_flags[code]
+
+    except:
+        pass
+
+    return None
+
+
+# =========================
+# FLAG ADD
+# =========================
+
+def add_flag_if_missing(link):
+
+    if flag_regex.search(link):
+        return link
+
+    host,_ = parse_host_port(link)
+
+    if not host:
+        return None
+
+    flag = get_country_flag(host)
+
+    if not flag:
+        return None
+
+    if "#" in link:
+        link = link + f" | {flag} |"
+    else:
+        link = link + f"#{flag}"
+
+    return link
 
 
 # =========================
@@ -126,33 +199,30 @@ def singbox_check(link):
 
     try:
 
-        config = {
-            "log": {"disabled": True},
-            "outbounds": [
-                {
-                    "type": "vless",
-                    "server": "1.1.1.1",
-                    "server_port": 443
-                }
-            ]
-        }
-
         with tempfile.NamedTemporaryFile(delete=False) as f:
-            config_path = f.name
+
+            config = {
+                "log":{"disabled":True},
+                "outbounds":[{"type":"direct"}]
+            }
+
+            path = f.name
+
             f.write(str(config).encode())
 
         p = subprocess.run(
-            ["sing-box", "run", "-c", config_path],
+            ["sing-box","run","-c",path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=10
         )
 
-        os.remove(config_path)
+        os.remove(path)
 
         return p.returncode == 0
 
     except:
+
         return False
 
 
@@ -162,108 +232,109 @@ def singbox_check(link):
 
 def main():
 
-    logging.info("START")
+    logging.info("🚀 START GENERATOR")
 
-    # -------------------
     # load sources
-    # -------------------
 
     with open(INPUT_FILE) as f:
+
         sources = [x.strip() for x in f if x.strip()]
 
-    logging.info(f"SOURCES: {len(sources)}")
+    logging.info(f"📡 SOURCES: {len(sources)}")
 
-    # -------------------
-    # download
-    # -------------------
+    # download subscriptions
 
     all_links = []
 
     with ThreadPoolExecutor(max_workers=THREADS) as ex:
 
-        results = ex.map(download_subscription, sources)
+        for result in ex.map(download_subscription,sources):
 
-        for r in results:
-            all_links.extend(r)
+            all_links.extend(result)
 
-    logging.info(f"DOWNLOADED KEYS: {len(all_links)}")
+    logging.info(f"⬇️ DOWNLOADED KEYS: {len(all_links)}")
 
-    # -------------------
     # remove duplicates
-    # -------------------
 
     unique = list(set(all_links))
 
-    logging.info(f"UNIQUE KEYS: {len(unique)}")
+    logging.info(f"♻️ UNIQUE KEYS: {len(unique)}")
 
-    # -------------------
-    # TCP CHECK
-    # -------------------
+    # TCP check
 
     tcp_alive = []
 
     def tcp_worker(link):
 
-        host, port = parse_host_port(link)
+        host,port = parse_host_port(link)
 
         if not host:
             return None
 
-        if tcp_check(host, port):
+        if tcp_check(host,port):
             return link
 
     with ThreadPoolExecutor(max_workers=THREADS) as ex:
 
-        for r in ex.map(tcp_worker, unique):
+        for r in ex.map(tcp_worker,unique):
 
             if r:
                 tcp_alive.append(r)
 
-    logging.info(f"TCP OK: {len(tcp_alive)}")
+    logging.info(f"🌐 TCP OK: {len(tcp_alive)}")
 
-    # -------------------
-    # TLS CHECK
-    # -------------------
+    # TLS check
 
     tls_alive = []
 
     def tls_worker(link):
 
-        host, port = parse_host_port(link)
+        host,port = parse_host_port(link)
 
         if not host:
             return None
 
-        if tls_check(host, port):
+        if tls_check(host,port):
             return link
 
     with ThreadPoolExecutor(max_workers=THREADS) as ex:
 
-        for r in ex.map(tls_worker, tcp_alive):
+        for r in ex.map(tls_worker,tcp_alive):
 
             if r:
                 tls_alive.append(r)
 
-    logging.info(f"TLS OK: {len(tls_alive)}")
+    logging.info(f"🔐 TLS OK: {len(tls_alive)}")
 
-    # -------------------
-    # SINGBOX CHECK
-    # -------------------
+    # add flags
 
-    working = []
+    flagged = []
 
     with ThreadPoolExecutor(max_workers=50) as ex:
 
-        for r in ex.map(singbox_check, tls_alive):
+        for r in ex.map(add_flag_if_missing,tls_alive):
 
             if r:
-                working.append(r)
+                flagged.append(r)
 
-    logging.info(f"WORKING KEYS: {len(working)}")
+    logging.info(f"🏳️ KEYS WITH FLAGS: {len(flagged)}")
 
-    # -------------------
-    # WRITE OUTPUT
-    # -------------------
+    # singbox check
+
+    working = []
+
+    with ThreadPoolExecutor(max_workers=30) as ex:
+
+        results = ex.map(singbox_check,flagged)
+
+        for link,ok in zip(flagged,results):
+
+            if ok:
+                working.append(link)
+
+    logging.info(f"✅ WORKING KEYS: {len(working)}")
+
+    # write output
 
     date = datetime.now().strftime("%d-%m-%Y")
 
@@ -277,13 +348,13 @@ def main():
 
     text = header + "\n".join(working)
 
-    with open(OUTPUT_TXT, "w", encoding="utf8") as f:
+    with open(OUTPUT_TXT,"w",encoding="utf8") as f:
         f.write(text)
 
-    with open(OUTPUT_BASE64, "w") as f:
+    with open(OUTPUT_BASE64,"w") as f:
         f.write(base64.b64encode(text.encode()).decode())
 
-    logging.info("FILES SAVED")
+    logging.info("💾 SUBSCRIPTIONS SAVED")
 
 
 if __name__ == "__main__":
