@@ -3,8 +3,9 @@
 # Все основные настройки вынесены в начало для удобства.
 # Добавлен случайный выбор User-Agent из списка популярных.
 # Добавлена статистика по источникам: сколько ссылок получено из каждого.
-# На этапе TCP-проверки добавлена проверка наличия explicit SNI (ключи без SNI отбрасываются).
 # Дедупликация по IP выполняется ДО TCP-проверки (остаётся одна ссылка на IP).
+# На этапе TCP-проверки проверяется наличие explicit SNI для всех протоколов, кроме Shadowsocks (ключи без SNI отбрасываются).
+# Shadowsocks теперь НЕ ОТБРАСЫВАЮТСЯ из-за отсутствия SNI.
 # Замер времени HTTP/HTTPS запросов и отсев медленных.
 # Расширен список тестовых URL.
 # В announce используется только дата (без секунд) для меньшего числа коммитов.
@@ -639,24 +640,29 @@ def create_xray_config(config, socks_port):
     base_config["outbounds"].append(outbound)
     return base_config
 
-# ---------- TCP ПРОВЕРКА (3 попытки + проверка наличия SNI и его разрешимости) ----------
+# ---------- TCP ПРОВЕРКА (3 попытки) ----------
+# ИЗМЕНЕНИЕ: Shadowsocks теперь не отбрасывается из-за отсутствия explicit_sni
 def check_tcp(link):
     parsed = parse_link(link)
     if not parsed:
         return (link, False, None, None)
     host, port = parsed['host'], parsed['port']
     explicit_sni = parsed.get('explicit_sni')
-    # Если нет явного SNI, считаем ключ нерабочим
-    if explicit_sni is None:
-        return (link, False, None, None)
-    try:
-        ip = resolve_host(host)
+    protocol = parsed['protocol']
+
+    # Для протоколов, требующих SNI (все, кроме ss), проверяем наличие explicit_sni и его разрешимость
+    if protocol != 'ss':
+        if explicit_sni is None:
+            return (link, False, None, None)
         # Проверка разрешимости explicit_sni (если это домен)
         if re.search(r'[a-zA-Z]', explicit_sni):
             try:
                 resolve_host(explicit_sni)
             except socket.gaierror:
                 return (link, False, None, None)
+
+    try:
+        ip = resolve_host(host)
         latencies = []
         for _ in range(TCP_ATTEMPTS):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -796,7 +802,7 @@ def check_real(link):
         if os.path.exists(config_path):
             os.unlink(config_path)
 
-# ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ (теперь без внутренней дедупликации) ----------
+# ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ ----------
 def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
