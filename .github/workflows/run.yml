@@ -23,9 +23,18 @@ jobs:
 
       - name: Install sing-box
         run: |
-          wget https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.tar.gz
+          # Получаем последнюю версию sing-box
+          VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+            | grep tag_name | cut -d '"' -f 4)
+          echo "Latest sing-box version: $VERSION"
+
+          # Скачиваем tar.gz актуальной версии
+          wget https://github.com/SagerNet/sing-box/releases/download/${VERSION}/sing-box-linux-amd64.tar.gz
+
+          # Распаковываем и перемещаем бинарник
           tar -xzf sing-box-linux-amd64.tar.gz
           sudo mv sing-box*/sing-box /usr/local/bin/
+          sing-box -v
 
       - name: Run VPN checker
         run: python GENERATOR.py
