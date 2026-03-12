@@ -26,6 +26,9 @@ from functools import lru_cache
 from datetime import datetime
 from urllib3.exceptions import InsecureRequestWarning
 
+# Принудительная буферизация строк для реального времени в логах GitHub Actions
+sys.stdout.reconfigure(line_buffering=True)
+
 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
 # ---------- НАСТРОЙКА ЛОГИРОВАНИЯ ----------
@@ -443,7 +446,7 @@ def shorten_link(link):
         return link[:q_pos]
     return link[:80]
 
-# ---------- TLS HANDShAKE ----------
+# ---------- TLS HANDSHAKE ----------
 def check_tls_handshake(ip, port, sni):
     """Проверяет успешность TLS handshake."""
     try:
@@ -679,7 +682,6 @@ def check_real(link):
         # Дополнительная проверка HTTPS если нужна
         if needs_https:
             try:
-                # Можно также измерить TTFB для HTTPS, но пока просто проверяем доступность
                 https_test = "https://www.google.com/generate_204"
                 resp = requests.get(
                     https_test, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
@@ -737,6 +739,7 @@ def filter_working_links(links):
     logging.info(f"🗂️ Уникальных (IP:порт) после TCP: {len(unique_tcp)} из {len(tcp_success)}")
 
     # Проверка TLS для протоколов, которые его используют
+    logging.info(f"🔒 Начинаю TLS-проверку для {len(unique_tcp)} серверов...")
     tls_passed = []
     for link, ip, latency in unique_tcp:
         parsed = parse_link(link)
