@@ -1,8 +1,3 @@
-# slashrf
-https://raw.githubusercontent.com/slashrf/VPNBYSLASH/refs/heads/main/freevpn
-
-# seknei3
-https://raw.githubusercontent.com/seknei3/psychic-fiestas/refs/heads/main/countries/russia.txt
 
 # kort0881
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_all_part1.txt
@@ -10,15 +5,6 @@ https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_E
 
 # лайм
 https://raw.githubusercontent.com/LimeHi/LimeVPN/refs/heads/main/LimeVPN.txt?v=1
-
-# ZipVPN
-https://raw.githubusercontent.com/zipvpn/FreeVPNNodes/refs/heads/main/free_v2ray_xray_nodes.txt
-
-# Отдельная ссылка с 10 конфигами
-https://gbr.mydan.online/configs
-
-# BLACK VLESS (RUS)
-https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS.txt
 
 # ConfigForge V2Ray
 https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/all.txt
@@ -29,37 +15,15 @@ https://raw.githubusercontent.com/cinev505/VlessTrogan-vpn-key/refs/heads/main/A
 #KFWL
 https://gist.githubusercontent.com/sevushyamamoto-stack/9341be7a058e132154d407d082a60fb1/raw/mysub.txt
 
-# LiVPN
-https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt
-
-# Махса 👍
-https://raw.githubusercontent.com/MahsaNetConfigTopic/config/refs/heads/main/xray_final.txt
-
-# это не я
-https://alley.serv00.net/1
-https://raw.githubusercontent.com/EtoNeYaProject/etoneyaproject.github.io/refs/heads/main/youtube
-
-# доступ к интернету
+# kort0881
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_part1.txt
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_part2.txt
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_part3.txt
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_all_part1.txt
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_all_part2.txt
 
-# juju
-https://github.com/WSJuJuB01/urban-succotash/releases/download/WS_VPN/NOTHINGV5.txt
-
 # openray
 https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/1.txt
 
 # LimeVPNPaser
 https://raw.githubusercontent.com/LimeHi/LimeVPNGenerator/main/Keys.txt?v=1
-
-# 🐶BobiVPN Lite🐶
-https://raw.githubusercontent.com/seknei3/psychic-fiestas/refs/heads/main/bobi_vpn_lite.txt
-
-# 🇷🇺 BobiVPN Russia
-https://raw.githubusercontent.com/seknei3/psychic-fiestas/refs/heads/main/countries/russia.txt
-
-# 🐈‍⬛ VPN cat
-https://raw.githubusercontent.com/VPN-cat/VPN/refs/heads/main/configs/VPN-cat-top-100
