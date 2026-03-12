@@ -2,8 +2,9 @@
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Ядро: sing‑box
 # Логи: INFO – основные этапы, прогресс TLS (многопоточно), результаты реальной проверки.
-# После TCP‑уникализации TLS-проверка в 100 потоков, затем реальная проверка через sing‑box (YouTube-тест).
-# Подписка сортируется: Россия, Европа, остальные; внутри по хосту.
+# После TCP‑уникализации TLS-проверка в 100 потоков, затем реальная проверка через sing‑box (тест YouTube/Google).
+# Подписка сортируется: сначала Россия, потом все остальные (включая неизвестные); внутри по хосту.
+# Обновление GeoIP базы раз в 7 дней.
 
 import os
 import re
@@ -91,23 +92,49 @@ MAX_LATENCY_MS = 300
 
 GEOIP_DB_PATH = "GeoLite2-City.mmdb"
 GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
+GEOIP_MAX_AGE_DAYS = 7  # Обновлять раз в 7 дней
 
 def ensure_geoip_db():
+    """Проверяет наличие и актуальность базы GeoIP, при необходимости скачивает."""
     if not GEOIP_AVAILABLE:
         return False
+
+    # Если файл существует и старше заданного количества дней – удаляем
     if os.path.exists(GEOIP_DB_PATH):
-        return True
-    logging.info("🌍 Скачиваю базу GeoIP (City)...")
+        file_time = os.path.getmtime(GEOIP_DB_PATH)
+        age_days = (time.time() - file_time) / (24 * 3600)
+        if age_days > GEOIP_MAX_AGE_DAYS:
+            os.remove(GEOIP_DB_PATH)
+            logging.info(f"🗑️ База GeoIP устарела (старше {GEOIP_MAX_AGE_DAYS} дней), удаляем для обновления.")
+
+    # Если файла нет – скачиваем
+    if not os.path.exists(GEOIP_DB_PATH):
+        logging.info("🌍 Скачиваю базу GeoIP (City)...")
+        try:
+            r = requests.get(GEOIP_DB_URL, timeout=30)
+            r.raise_for_status()
+            with open(GEOIP_DB_PATH, 'wb') as f:
+                f.write(r.content)
+            logging.info("✅ База GeoIP (City) скачана")
+        except Exception as e:
+            logging.error(f"❌ Ошибка скачивания GeoIP: {e}")
+            return False
+
+    # Проверяем целостность базы (тестовый запрос)
     try:
-        r = requests.get(GEOIP_DB_URL, timeout=30)
-        r.raise_for_status()
-        with open(GEOIP_DB_PATH, 'wb') as f:
-            f.write(r.content)
-        logging.info("✅ База GeoIP (City) скачана")
+        test_reader = geoip2.database.Reader(GEOIP_DB_PATH)
+        test_reader.city("8.8.8.8")  # пробуем определить Google DNS
+        test_reader.close()
+        logging.info("✅ GeoIP база загружена и работает")
         return True
     except Exception as e:
-        logging.error(f"❌ Ошибка скачивания GeoIP: {e}")
-        return False
+        logging.error(f"❌ База GeoIP повреждена или не читается: {e}. Попытка перезагрузить...")
+        try:
+            os.remove(GEOIP_DB_PATH)
+        except:
+            pass
+        # Повторная попытка скачивания
+        return ensure_geoip_db()  # рекурсивный вызов для повторной попытки
 
 reader = None
 if ensure_geoip_db():
@@ -117,6 +144,7 @@ if ensure_geoip_db():
         logging.error(f"❌ Не удалось открыть базу GeoIP: {e}")
 
 def get_geo_info(ip):
+    """Возвращает (флаг, город) для IP или ("", "") при ошибке."""
     if reader is None:
         return "", ""
     try:
@@ -191,6 +219,7 @@ def gather_all_links(sources):
     return list(all_links)
 
 def flag_to_country_code(flag):
+    """Преобразует флаг-эмодзи в двухбуквенный код страны. Если флаг некорректен, возвращает 'ZZ'."""
     if len(flag) < 2:
         return 'ZZ'
     code = ''
@@ -762,22 +791,26 @@ def filter_working_links(links):
                 logging.info(f"⏳ TLS-проверка: {completed}/{tls_total} выполнено")
 
     logging.info(f"🔒 TLS-проверка завершена. Прошли: {len(tls_passed)}/{tls_total}")
-    unique_tcp = tls_passed
-    if not unique_tcp:
+    if not tls_passed:
         return []
 
-    # Определяем геоданные
-    logging.info(f"🌍 Определение геоданных для {len(unique_tcp)} серверов...")
+    # Определяем геоданные для всех прошедших TLS (даже если не удалось определить – ставим флаг по умолчанию)
+    logging.info(f"🌍 Определение геоданных для {len(tls_passed)} серверов...")
     geo_by_link = {}
-    for link, ip, _ in unique_tcp:
+    for link, ip, _ in tls_passed:
         flag, city = get_geo_info(ip) if ip else ("", "")
-        if flag:
-            geo_by_link[link] = (flag, city)
-    logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
-    if not geo_by_link:
-        return []
+        if not flag:
+            # Если геоданные не получены, используем флаг "🏴" и пустой город
+            flag = "🏴"
+            city = ""
+            logging.debug(f"⚠️ Не удалось определить геоданные для {ip}, использую флаг {flag}")
+        else:
+            logging.debug(f"🌍 {ip} → {flag} {city}")
+        geo_by_link[link] = (flag, city)
 
-    # Реальная проверка через sing‑box (только для серверов с флагами)
+    logging.info(f"🧾 Серверов с определёнными флагами: {sum(1 for v in geo_by_link.values() if v[0] != '🏴')} из {len(geo_by_link)}")
+
+    # Реальная проверка через sing‑box (для всех ссылок, для которых есть гео)
     logging.info(f"🧪 Этап 2: Реальная проверка через sing‑box для {len(geo_by_link)} ссылок...")
     working_links_with_geo = []
     stage_total = len(geo_by_link)
@@ -812,7 +845,7 @@ def filter_working_links(links):
                 emoji = "❌"
             log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short}"
             logging.info(log_msg)
-    logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
+    logging.info(f"📊 Реальная проверка завершена. Рабочих: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
 
 # ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ----------
@@ -822,23 +855,13 @@ def save_working_links(links_with_geo):
         logging.warning("Нет серверов для сохранения.")
         return 0
 
-    europe_codes = [
-        'AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU',
-        'IE','IT','LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK',
-        'GB','CH','NO','IS','LI','AL','BA','RS','ME','MK','UA','BY','MD',
-        'GE','AZ','AM','TR'
-    ]
-
+    # Функция сортировки: сначала Россия (code == 'RU'), потом все остальные.
+    # Внутри каждой группы сортируем по коду страны, городу и хосту для стабильности.
     def sort_key(item):
         link, flag, city = item
         code = flag_to_country_code(flag)
-        if code == 'RU':
-            priority = 0
-        elif code in europe_codes:
-            priority = 1
-        else:
-            priority = 2
-        # внутри группы сортируем по хосту (из ссылки) для стабильности
+        # Приоритет: 0 для RU, 1 для всех остальных
+        priority = 0 if code == 'RU' else 1
         parsed = parse_link(link)
         host = parsed['host'] if parsed else link
         return (priority, code, city or '', host)
@@ -909,7 +932,7 @@ def main():
         create_base64_subscription()
     else:
         logging.warning("Нет серверов с флагами – Base64 не создана.")
-    logging.info(f"📊 Итог: {written} рабочих с флагами из {len(all_links)} проверенных")
+    logging.info(f"📊 Итог: {written} рабочих из {len(all_links)} проверенных")
     logging.info("🏁 Работа завершена")
 
 if __name__ == "__main__":
