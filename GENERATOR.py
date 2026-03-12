@@ -7,9 +7,10 @@
 # На этапе TCP-проверки проверяется наличие explicit SNI для всех протоколов, кроме Shadowsocks.
 # Shadowsocks теперь НЕ ОТБРАСЫВАЮТСЯ из-за отсутствия SNI.
 # Замер времени HTTP/HTTPS запросов и отсев медленных.
-# Расширен список тестовых URL.
-# ДОБАВЛЕН тест на джиттер (вариацию задержки) для оценки стабильности соединения.
-# В announce используется только дата (без секунд) для меньшего числа коммитов.
+# Добавлен тест на джиттер (вариацию задержки).
+# ДОБАВЛЕНО: тестирование обхода блокировок (DPI) – проверка доступа к заблокированным ресурсам.
+# ДОБАВЛЕНО: поддержка IPv6 (опционально, если ENABLE_IPV6=True).
+# ДОБАВЛЕНО: динамическая регулировка параллельности (количество потоков подстраивается под число задач).
 
 import os
 import re
@@ -109,13 +110,13 @@ USER_AGENTS = [
 
 # ---------- TCP-проверка (этап 1) ----------
 TCP_CHECK_TIMEOUT = 5           # таймаут соединения, секунд
-TCP_MAX_WORKERS = 400            # количество параллельных потоков
+TCP_MAX_WORKERS = 400            # максимальное количество параллельных потоков (будет адаптировано)
 MAX_LATENCY_MS = 300             # максимальная допустимая TCP-задержка (мс)
 TCP_ATTEMPTS = 3                 # количество попыток TCP-соединения
 
 # ---------- Реальная проверка через Xray (этап 2) ----------
 REAL_CHECK_TIMEOUT = 15          # таймаут HTTP/HTTPS запросов (секунд)
-REAL_CHECK_CONCURRENCY = 20       # параллельных проверок Xray
+REAL_CHECK_MAX_WORKERS = 20       # максимальное количество параллельных проверок Xray (будет адаптировано)
 REAL_CHECK_ATTEMPTS = 1           # количество попыток реальной проверки
 MAX_HTTP_LATENCY_MS = 1000        # максимальная задержка HTTP (мс) – отсев медленных
 
@@ -126,6 +127,19 @@ JITTER_TARGET_HOST = "www.google.com"      # хост для измерения 
 JITTER_TARGET_PORT = 80                     # порт (80 для HTTP, без TLS)
 MAX_JITTER_MS = 100                         # максимальное среднее абсолютное отклонение (мс)
 JITTER_DELAY_BETWEEN = 0.05                  # задержка между попытками (сек)
+
+# ---------- Тестирование обхода блокировок (DPI) ----------
+DPI_CHECK_ENABLED = True                    # включить проверку обхода блокировок
+DPI_TEST_URLS = [                           # сайты, заблокированные в РФ (пример)
+    "https://rutracker.org",
+    "https://www.instagram.com",
+    "https://www.youtube.com"
+]
+DPI_REQUIRE_ALL = False                     # если True – нужен доступ ко всем, иначе достаточно одного
+
+# ---------- Настройки IPv6 ----------
+ENABLE_IPV6 = True                          # пробовать использовать IPv6, если доступно
+PREFER_IPV6 = True                          # предпочитать IPv6 перед IPv4 (если ENABLE_IPV6=True)
 
 # ---------- Тестовые URL для проверки ----------
 TEST_HTTP_URLS = [
@@ -186,7 +200,37 @@ def get_geo_info(ip):
 # ---------- Вспомогательные функции ----------
 @lru_cache(maxsize=256)
 def resolve_host(host):
-    return socket.gethostbyname(host)
+    """
+    Разрешает домен в IP-адрес с учётом настроек IPv6.
+    Возвращает строку с IP-адресом или None при ошибке.
+    """
+    try:
+        if ENABLE_IPV6:
+            # Пытаемся получить IPv6 адрес, если PREFER_IPV6=True
+            if PREFER_IPV6:
+                try:
+                    addrs = socket.getaddrinfo(host, None, socket.AF_INET6, socket.SOCK_STREAM)
+                    if addrs:
+                        return addrs[0][4][0]
+                except socket.gaierror:
+                    pass
+            # Пробуем IPv4
+            try:
+                addrs = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+                if addrs:
+                    return addrs[0][4][0]
+            except socket.gaierror:
+                pass
+            # Если не получили, пробуем любой (IPv6 или IPv4)
+            addrs = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            if addrs:
+                return addrs[0][4][0]
+        else:
+            # Только IPv4
+            return socket.gethostbyname(host)
+    except Exception:
+        pass
+    return None
 
 def find_free_port():
     for _ in range(10):
@@ -483,17 +527,16 @@ def resolve_ip_for_link(link):
     if not parsed:
         return link, None
     host = parsed['host']
-    try:
-        ip = resolve_host(host)
-        return link, ip
-    except:
-        return link, None
+    ip = resolve_host(host)
+    return link, ip
 
 def deduplicate_by_ip_before_tcp(links):
     """Дедупликация по IP до TCP-проверки: оставляем только одну ссылку на каждый IP (первую попавшуюся)."""
     ip_to_link = {}
     resolved_count = 0
-    with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
+    # Адаптивное количество потоков
+    workers = min(TCP_MAX_WORKERS, len(links))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_link = {executor.submit(resolve_ip_for_link, link): link for link in links}
         for future in as_completed(future_to_link):
             link, ip = future.result()
@@ -672,9 +715,13 @@ def check_tcp(link):
 
     try:
         ip = resolve_host(host)
+        if ip is None:
+            return (link, False, None, None)
         latencies = []
         for _ in range(TCP_ATTEMPTS):
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Определяем семейство адресов по ip
+            family = socket.AF_INET6 if ':' in ip else socket.AF_INET
+            sock = socket.socket(family, socket.SOCK_STREAM)
             sock.settimeout(TCP_CHECK_TIMEOUT)
             start = time.time()
             result = sock.connect_ex((ip, port))
@@ -708,8 +755,6 @@ def measure_jitter(proxies):
                 timeout=REAL_CHECK_TIMEOUT,
                 headers={'User-Agent': random.choice(USER_AGENTS)}
             )
-            # Нам важно только время установки соединения + время ответа сервера,
-            # но для джиттера достаточно относительных изменений.
             latency = int((time.time() - start) * 1000)
             latencies.append(latency)
         except Exception:
@@ -721,9 +766,43 @@ def measure_jitter(proxies):
         return False, None, None
 
     avg = sum(latencies) / len(latencies)
-    # Среднее абсолютное отклонение (джиттер)
     jitter = sum(abs(l - avg) for l in latencies) / len(latencies)
     return True, avg, jitter
+
+# ---------- ПРОВЕРКА ОБХОДА БЛОКИРОВОК (DPI) ----------
+def check_dpi(proxies):
+    """
+    Проверяет доступность заблокированных ресурсов через прокси.
+    Возвращает True, если условие выполнено (достаточно одного успеха или всех).
+    """
+    if not DPI_CHECK_ENABLED:
+        return True
+
+    success_count = 0
+    for url in DPI_TEST_URLS:
+        try:
+            resp = requests.get(
+                url,
+                proxies=proxies,
+                timeout=REAL_CHECK_TIMEOUT,
+                headers={'User-Agent': random.choice(USER_AGENTS)},
+                allow_redirects=True
+            )
+            if resp.status_code == 200:
+                success_count += 1
+                if not DPI_REQUIRE_ALL:
+                    return True
+            else:
+                if DPI_REQUIRE_ALL:
+                    return False
+        except Exception:
+            if DPI_REQUIRE_ALL:
+                return False
+            continue
+    if DPI_REQUIRE_ALL:
+        return success_count == len(DPI_TEST_URLS)
+    else:
+        return success_count > 0
 
 # ---------- РЕАЛЬНАЯ ПРОВЕРКА (одна попытка) с замером времени ----------
 def check_real(link):
@@ -828,8 +907,10 @@ def check_real(link):
                     return False
                 if jitter_val > MAX_JITTER_MS:
                     return False
-                # Можно залогировать высокий джиттер для отладки
-                # logging.debug(f"Jitter: {jitter_val:.1f} ms")
+
+            # Проверка обхода блокировок (DPI)
+            if not check_dpi(proxies):
+                return False
 
             total_latency = int((time.time() - start_total) * 1000)
             if total_latency > MAX_HTTP_LATENCY_MS * 3:
@@ -863,9 +944,11 @@ def filter_working_links(links):
     total_checks = len(links)
     logging.info(f"🌐 Этап 1: TCP-проверка {total_checks} ссылок...")
 
+    # Адаптивное количество потоков для TCP
+    tcp_workers = min(TCP_MAX_WORKERS, total_checks)
     # Этап 1: TCP
     tcp_success = []  # (link, ip, latency)
-    with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=tcp_workers) as executor:
         future_to_link = {executor.submit(check_tcp, link): link for link in links}
         for future in as_completed(future_to_link):
             current_check += 1
@@ -895,9 +978,12 @@ def filter_working_links(links):
     total_to_check = len(links_to_check)
     processed = 0
 
+    # Адаптивное количество потоков для реальной проверки
+    real_workers = min(REAL_CHECK_MAX_WORKERS, total_to_check)
+
     working_links_with_geo = []  # (link, flag, city, country_code, latency, ip)
 
-    with ThreadPoolExecutor(max_workers=REAL_CHECK_CONCURRENCY) as executor:
+    with ThreadPoolExecutor(max_workers=real_workers) as executor:
         future_to_link = {executor.submit(check_real, link): link for link in links_to_check}
         for future in as_completed(future_to_link):
             processed += 1
