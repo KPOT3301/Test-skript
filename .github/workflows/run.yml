@@ -12,7 +12,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # нужна полная история для корректного pull/rebase
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,22 +25,35 @@ jobs:
 
       - name: Download and install sing-box
         run: |
-          # Определяем URL последней версии sing-box для linux-amd64
-          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep "browser_download_url.*linux-amd64" | cut -d '"' -f 4)
-          if [ -z "$LATEST_URL" ]; then
-            echo "Не удалось получить ссылку на последнюю версию sing-box"
+          set -e
+          sudo apt-get update && sudo apt-get install -y jq
+          LATEST_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+          if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" = "null" ]; then
+            echo "Failed to get latest version"
             exit 1
           fi
-          wget -q "$LATEST_URL" -O sing-box.tar.gz
+          echo "Latest version: $LATEST_VERSION"
+          FILE_NAME="sing-box-${LATEST_VERSION}-linux-amd64.tar.gz"
+          DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_VERSION}/${FILE_NAME}"
+          echo "Downloading from $DOWNLOAD_URL"
+          wget -q "$DOWNLOAD_URL" -O sing-box.tar.gz
           tar -xzf sing-box.tar.gz
-          # Копируем бинарник в текущую папку
-          find . -name "sing-box" -type f -exec cp {} ./sing-box \;
+          find . -maxdepth 2 -name "sing-box" -type f -exec cp {} ./sing-box \;
           chmod +x ./sing-box
-          # Добавляем текущую папку в PATH, чтобы команда 'sing-box' была доступна
+          ./sing-box version
           echo "$(pwd)" >> $GITHUB_PATH
+
+      - name: Create sources.txt if not exists
+        run: |
+          if [ ! -f sources.txt ]; then
+            echo "https://example.com/sub" > sources.txt
+            echo "sources.txt created with placeholder. Please edit it."
+          fi
 
       - name: Run GENERATOR.py
         run: python GENERATOR.py
+        env:
+          LOG_LEVEL: INFO
 
       - name: Commit and push if changed
         run: |
