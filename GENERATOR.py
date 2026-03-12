@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
-# Версия с многопоточной TLS-проверкой и ядром Sing-box. Оптимизировано для GitHub Actions.
+# Версия с многопоточной TLS-проверкой и ядром Sing-box. Краткий лог для TLS.
 
 import os
 import re
@@ -66,14 +66,14 @@ OUTPUT_FILE = "subscription.txt"
 OUTPUT_BASE64_FILE = "subscription_base64.txt"
 REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-SING_BOX_CORE_PATH = "sing-box"  # заменено с xray на sing-box
+SING_BOX_CORE_PATH = "sing-box"
 
 # TCP-проверка
 TCP_CHECK_TIMEOUT = 10
 TCP_MAX_WORKERS = 400
 
 # Реальная проверка (через Sing-box)
-SOCKS_PORT = 1080  # стандартный порт для sing-box socks
+SOCKS_PORT = 1080
 REAL_CHECK_TIMEOUT = 15
 REAL_CHECK_CONCURRENCY = 30
 SING_BOX_STARTUP_DELAY = 1
@@ -156,7 +156,6 @@ def fetch_content(url):
         return None
 
 def extract_links_from_text(text):
-    # Добавлены vmess и hysteria2/hy2
     return re.findall(r'(?:vless|ss|trojan|vmess|hysteria2|hy2)://[^\s<>"\']+', text)
 
 def decode_base64_content(encoded):
@@ -187,7 +186,7 @@ def gather_all_links(sources):
     logging.info(f"🎯 Всего уникальных ссылок: {len(all_links)}")
     return list(all_links)
 
-# ---------- ПАРСЕРЫ (оставлены без изменений, см. предыдущие версии) ----------
+# ---------- ПАРСЕРЫ ----------
 def parse_vless_link(link):
     try:
         without_proto = link[8:]
@@ -415,7 +414,7 @@ def shorten_link(link):
         return link[:q_pos]
     return link[:80]
 
-# ---------- TLS-ПРОВЕРКА (новая функция) ----------
+# ---------- TLS-ПРОВЕРКА ----------
 def tls_check(link, parsed):
     """Пытается установить TLS-соединение с хостом:порт, используя SNI из parsed"""
     host = parsed['host']
@@ -428,7 +427,6 @@ def tls_check(link, parsed):
         context.verify_mode = ssl.CERT_NONE
         with socket.create_connection((ip, port), timeout=TCP_CHECK_TIMEOUT) as sock:
             with context.wrap_socket(sock, server_hostname=sni) as ssock:
-                # просто устанавливаем соединение, дополнительных проверок не нужно
                 pass
         return True
     except Exception:
@@ -439,7 +437,6 @@ def create_singbox_config(config):
     """Формирует конфигурацию для sing-box на основе распарсенных данных"""
     protocol = config['protocol']
 
-    # Базовый конфиг с inbound (SOCKS5 на локальном порту)
     outbound = {}
 
     if protocol == 'vless':
@@ -474,7 +471,6 @@ def create_singbox_config(config):
                     "fingerprint": config.get('fp', 'chrome')
                 }
             }
-        # Транспорт
         if config.get('type') == 'ws':
             outbound["transport"] = {
                 "type": "ws",
@@ -483,7 +479,6 @@ def create_singbox_config(config):
                     "Host": config.get('host_header', config['host'])
                 }
             }
-        # Другие транспорты можно добавить при необходимости
 
     elif protocol == 'vmess':
         outbound = {
@@ -567,11 +562,10 @@ def create_singbox_config(config):
     else:
         return None
 
-    # Собираем полный конфиг
     sing_config = {
         "log": {
             "level": "error",
-            "output": ""  # в stderr
+            "output": ""
         },
         "inbounds": [
             {
@@ -585,7 +579,7 @@ def create_singbox_config(config):
     }
     return sing_config
 
-# ---------- TCP ПРОВЕРКА (возвращает IP и задержку при успехе) ----------
+# ---------- TCP ПРОВЕРКА ----------
 def check_tcp(link):
     parsed = parse_link(link)
     if not parsed:
@@ -603,7 +597,7 @@ def check_tcp(link):
     except:
         return (link, False, None, None)
 
-# ---------- РЕАЛЬНАЯ ПРОВЕРКА (через Sing-box, однократная) ----------
+# ---------- РЕАЛЬНАЯ ПРОВЕРКА (через Sing-box) ----------
 def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
@@ -715,38 +709,43 @@ def filter_working_links(links):
     if not geo_by_link:
         return []
 
-    # Этап 2: TLS-проверка (параллельно)
-    logging.info(f"🔒 TLS-проверка {len(geo_by_link)} серверов...")
+    # Этап 2: TLS-проверка (параллельно) с кратким логом
+    tls_list = list(geo_by_link.keys())
+    tls_total = len(tls_list)
+    logging.info(f"🔒 TLS-проверка {tls_total} серверов...")
     tls_passed = []
-    tls_failed = 0
+    tls_current = 0
 
     def check_tls_wrapper(link):
         parsed = parse_link(link)
         if not parsed:
-            return False
+            return (link, False)
         # Проверяем, нужен ли TLS
         if parsed['protocol'] in ('vless', 'vmess', 'trojan', 'hysteria2'):
             # Для vless с security=reality пропускаем TLS-проверку
             if parsed['protocol'] == 'vless' and parsed.get('security') == 'reality':
-                return True  # Reality не требует TLS-рукопожатия
+                return (link, True)  # Reality не требует TLS-рукопожатия
             # Для остальных выполняем проверку
-            return tls_check(link, parsed)
+            ok = tls_check(link, parsed)
+            return (link, ok)
         # Протоколы без TLS (ss) считаем прошедшими
-        return True
+        return (link, True)
 
     with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
-        future_to_link = {executor.submit(check_tls_wrapper, link): link for link in geo_by_link.keys()}
+        future_to_link = {executor.submit(check_tls_wrapper, link): link for link in tls_list}
         for future in as_completed(future_to_link):
-            link = future_to_link[future]
-            try:
-                ok = future.result()
-            except Exception:
-                ok = False
+            tls_current += 1
+            link, ok = future.result()
+            proto = link.split('://')[0]
+            short = shorten_link(link)
             if ok:
                 tls_passed.append(link)
+                emoji = "✅"
             else:
-                tls_failed += 1
+                emoji = "❌"
+            logging.info(f"{proto} {emoji} [TLS {tls_current}/{tls_total}]: {short}")
 
+    tls_failed = tls_total - len(tls_passed)
     logging.info(f"🔐 TLS-проверка завершена. Прошли: {len(tls_passed)}, не прошли: {tls_failed}")
 
     if not tls_passed:
@@ -773,7 +772,6 @@ def filter_working_links(links):
             else:
                 emoji = "❌"
 
-            # Краткий лог (только протокол и результат)
             proto = link.split('://')[0]
             short = shorten_link(link)
             logging.info(f"{proto} {emoji} [{stage_current}/{stage_total}]: {short}")
@@ -781,7 +779,7 @@ def filter_working_links(links):
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
 
-# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ (С ФЛАГАМИ И ГОРОДАМИ) ----------
+# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ----------
 def save_working_links(links_with_geo):
     logging.info(f"💾 Сохраняю {len(links_with_geo)} серверов с геоданными...")
     if not links_with_geo:
