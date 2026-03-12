@@ -5,11 +5,13 @@
 # Добавлен вывод количества ключей из каждого источника в процессе сбора.
 # После TCP‑проверки оставляем только уникальные пары (IP, порт) с наименьшей задержкой.
 # Подавлены предупреждения InsecureRequestWarning.
-# Подписка сортируется: Россия, Европа, остальные.
+# Подписка сортируется: Россия, Европа, остальные; внутри групп по TTFB (лучшие сверху).
+# Добавлена проверка TLS handshake и замер TTFB (Time To First Byte) с порогом отсева.
 
 import os
 import re
 import socket
+import ssl
 import base64
 import logging
 import subprocess
@@ -79,6 +81,12 @@ SING_BOX_PATH = "sing-box"
 # TCP-проверка
 TCP_CHECK_TIMEOUT = 10
 TCP_MAX_WORKERS = 400
+
+# TLS-проверка
+TLS_CHECK_TIMEOUT = 5
+
+# TTFB
+MAX_TTFB_MS = 1000  # максимально допустимый TTFB (мс)
 
 # Реальная проверка
 SOCKS_PORT = 8080
@@ -206,10 +214,7 @@ def flag_to_country_code(flag):
             code += chr(ord(ch) - 127397)
     return code if len(code) == 2 else 'ZZ'
 
-# ---------- ПАРСЕРЫ (сокращено для экономии места, см. полную версию в предыдущих ответах) ----------
-# ... (все функции parse_* остаются без изменений)
-# Вставьте сюда все парсеры из предыдущего полного листинга
-
+# ---------- ПАРСЕРЫ ----------
 def parse_vless_link(link):
     try:
         without_proto = link[8:]
@@ -438,6 +443,35 @@ def shorten_link(link):
         return link[:q_pos]
     return link[:80]
 
+# ---------- TLS HANDShAKE ----------
+def check_tls_handshake(ip, port, sni):
+    """Проверяет успешность TLS handshake."""
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((ip, port), timeout=TLS_CHECK_TIMEOUT) as sock:
+            with context.wrap_socket(sock, server_hostname=sni) as ssock:
+                ssock.do_handshake()
+        return True
+    except Exception:
+        return False
+
+# ---------- TTFB ----------
+def measure_ttfb(proxies, url):
+    """Измеряет Time To First Byte (мс)."""
+    try:
+        start = time.time()
+        resp = requests.get(
+            url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
+            headers={'User-Agent': USER_AGENT}, stream=True
+        )
+        # читаем первый байт
+        next(resp.iter_content(1))
+        ttfb = int((time.time() - start) * 1000)
+        resp.close()
+        return ttfb
+    except Exception:
+        return None
+
 # ---------- СОЗДАНИЕ КОНФИГА SING-BOX ----------
 def create_singbox_config(config):
     inbound = {
@@ -594,17 +628,20 @@ def check_tcp(link):
     except:
         return (link, False, None, None)
 
-# ---------- РЕАЛЬНАЯ ПРОВЕРКА ----------
+# ---------- РЕАЛЬНАЯ ПРОВЕРКА (с TTFB) ----------
 def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
-        return (link, False)
+        return (link, False, None)
+
     sb_config = create_singbox_config(config_dict)
     if not sb_config:
-        return (link, False)
+        return (link, False, None)
+
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         config_path = f.name
         json.dump(sb_config, f, indent=2)
+
     process = None
     try:
         process = subprocess.Popen(
@@ -612,10 +649,12 @@ def check_real(link):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         time.sleep(SING_BOX_STARTUP_DELAY)
+
         proxies = {
             'http': f'socks5h://127.0.0.1:{SOCKS_PORT}',
             'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
         }
+
         needs_https = False
         if config_dict['protocol'] in ('vless', 'vmess', 'trojan', 'hysteria2'):
             if config_dict['protocol'] == 'vmess':
@@ -626,30 +665,36 @@ def check_real(link):
                 security = config_dict.get('security', 'none')
                 if security in ('tls', 'reality'):
                     needs_https = True
-        http_success = False
+
+        # Измеряем TTFB на одном из тестовых URL
+        ttfb = None
         for test_url in TEST_URLS:
-            try:
-                resp = requests.get(
-                    test_url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                    headers={'User-Agent': USER_AGENT}, allow_redirects=False
-                )
-                http_success = True
+            ttfb = measure_ttfb(proxies, test_url)
+            if ttfb is not None:
                 break
-            except Exception:
-                continue
-        if not http_success:
-            return (link, False)
+
+        if ttfb is None or ttfb > MAX_TTFB_MS:
+            return (link, False, ttfb)
+
+        # Дополнительная проверка HTTPS если нужна
         if needs_https:
             try:
+                # Можно также измерить TTFB для HTTPS, но пока просто проверяем доступность
                 https_test = "https://www.google.com/generate_204"
-                requests.get(https_test, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                             headers={'User-Agent': USER_AGENT}, verify=False)
+                resp = requests.get(
+                    https_test, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
+                    headers={'User-Agent': USER_AGENT}, verify=False, stream=True
+                )
+                next(resp.iter_content(1))
+                resp.close()
             except Exception:
-                return (link, False)
-        return (link, True)
+                return (link, False, ttfb)
+
+        return (link, True, ttfb)
+
     except Exception as e:
         logging.debug(f"Ошибка при проверке {link[:60]}: {e}")
-        return (link, False)
+        return (link, False, None)
     finally:
         if process:
             process.terminate()
@@ -677,6 +722,8 @@ def filter_working_links(links):
     logging.info(f"📊 TCP-проверка завершена. Прошли (latency <= {MAX_LATENCY_MS} мс): {len(tcp_success)}/{total_checks}")
     if not tcp_success:
         return []
+
+    # Фильтрация по уникальной паре (IP, порт) – оставляем лучшую latency
     best_by_endpoint = {}
     for link, ip, latency in tcp_success:
         parsed = parse_link(link)
@@ -688,6 +735,36 @@ def filter_working_links(links):
             best_by_endpoint[key] = (link, latency)
     unique_tcp = [(link, ip, latency) for (ip, port), (link, latency) in best_by_endpoint.items()]
     logging.info(f"🗂️ Уникальных (IP:порт) после TCP: {len(unique_tcp)} из {len(tcp_success)}")
+
+    # Проверка TLS для протоколов, которые его используют
+    tls_passed = []
+    for link, ip, latency in unique_tcp:
+        parsed = parse_link(link)
+        if not parsed:
+            continue
+        needs_tls = False
+        if parsed['protocol'] == 'trojan':
+            needs_tls = True
+        elif parsed['protocol'] == 'vless':
+            needs_tls = parsed.get('security') in ('tls', 'reality')
+        elif parsed['protocol'] == 'vmess':
+            needs_tls = parsed.get('tls', False)
+        elif parsed['protocol'] == 'hysteria2':
+            needs_tls = True
+        if needs_tls:
+            sni = parsed.get('sni', parsed['host'])
+            if check_tls_handshake(ip, parsed['port'], sni):
+                tls_passed.append((link, ip, latency))
+            else:
+                logging.debug(f"TLS handshake failed for {link[:60]}")
+        else:
+            tls_passed.append((link, ip, latency))
+    logging.info(f"🔒 TLS-проверка прошли: {len(tls_passed)} из {len(unique_tcp)}")
+    unique_tcp = tls_passed
+    if not unique_tcp:
+        return []
+
+    # Определяем геоданные
     logging.info(f"🌍 Определение геоданных для {len(unique_tcp)} серверов...")
     geo_by_link = {}
     for link, ip, _ in unique_tcp:
@@ -697,8 +774,9 @@ def filter_working_links(links):
     logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
     if not geo_by_link:
         return []
-    logging.info(f"🧪 Этап 2: Реальная проверка {len(geo_by_link)} ссылок...")
-    working_links_with_geo = []
+
+    logging.info(f"🧪 Этап 2: Реальная проверка (TTFB ≤ {MAX_TTFB_MS} мс) {len(geo_by_link)} ссылок...")
+    working_links_with_geo = []  # будем хранить (link, flag, city, ttfb)
     stage_total = len(geo_by_link)
     stage_current = 0
     links_to_check = list(geo_by_link.keys())
@@ -708,7 +786,7 @@ def filter_working_links(links):
             stage_current += 1
             current_check += 1
             record_counter += 1
-            link, is_working = future.result()
+            link, is_working, ttfb = future.result()
             short = shorten_link(link)
             if link.startswith('vless://'):
                 proto = 'vless'
@@ -724,31 +802,31 @@ def filter_working_links(links):
                 proto = '?'
             flag, city = geo_by_link[link]
             if is_working:
-                working_links_with_geo.append((link, flag, city))
+                working_links_with_geo.append((link, flag, city, ttfb))
                 emoji = "✅"
             else:
                 emoji = "❌"
-            log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short}"
+            log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short} (ttfb={ttfb}ms)"
             logging.info(log_msg)
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
 
-# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ С СОРТИРОВКОЙ ----------
-def save_working_links(links_with_geo):
-    logging.info(f"💾 Сохраняю {len(links_with_geo)} серверов с геоданными...")
-    if not links_with_geo:
+# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ С СОРТИРОВКОЙ ПО TTFB ----------
+def save_working_links(links_with_geo_ttfb):
+    logging.info(f"💾 Сохраняю {len(links_with_geo_ttfb)} серверов с геоданными...")
+    if not links_with_geo_ttfb:
         logging.warning("Нет серверов для сохранения.")
         return 0
 
-    # Сортировка: Россия, Европа, остальные
     europe_codes = [
         'AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU',
         'IE','IT','LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK',
         'GB','CH','NO','IS','LI','AL','BA','RS','ME','MK','UA','BY','MD',
         'GE','AZ','AM','TR'
     ]
+
     def sort_key(item):
-        link, flag, city = item
+        link, flag, city, ttfb = item
         code = flag_to_country_code(flag)
         if code == 'RU':
             priority = 0
@@ -756,9 +834,10 @@ def save_working_links(links_with_geo):
             priority = 1
         else:
             priority = 2
-        return (priority, code, city or '')
+        # внутри каждой группы сортируем по TTFB (меньше -> лучше)
+        return (priority, ttfb, code, city or '')
 
-    links_with_geo.sort(key=sort_key)
+    links_with_geo_ttfb.sort(key=sort_key)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         f.write(f"#profile-title:{PROFILE_TITLE}\n")
@@ -766,15 +845,15 @@ def save_working_links(links_with_geo):
         f.write(f"#profile-update-interval:{PROFILE_UPDATE_INTERVAL}\n")
         f.write(f"#support-url:{SUPPORT_URL}\n")
         f.write(f"#profile-web-page-url:{PROFILE_WEB_PAGE_URL}\n")
-        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
-        for idx, (link, flag, city) in enumerate(links_with_geo, 1):
+        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo_ttfb)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
+        for idx, (link, flag, city, ttfb) in enumerate(links_with_geo_ttfb, 1):
             link_clean = re.sub(r'#.*$', '', link)
             city_part = f" {city}" if city else ""
-            tag = f"#🔑📱ТОННЕЛЬ {idx:04d} | {flag}{city_part} |"
+            tag = f"#🔑📱ТОННЕЛЬ {idx:04d} | {flag}{city_part} | TTFB={ttfb}ms"
             f.write(link_clean + tag + '\n')
 
-    logging.info(f"✅ Сохранено {len(links_with_geo)} серверов в {OUTPUT_FILE}")
-    return len(links_with_geo)
+    logging.info(f"✅ Сохранено {len(links_with_geo_ttfb)} серверов в {OUTPUT_FILE}")
+    return len(links_with_geo_ttfb)
 
 def create_base64_subscription():
     try:
@@ -818,13 +897,13 @@ def main():
     record_counter = 0
     current_check = 0
     total_checks = len(all_links)
-    working_links_with_geo = filter_working_links(all_links)
-    written = save_working_links(working_links_with_geo)
+    working_links_with_geo_ttfb = filter_working_links(all_links)
+    written = save_working_links(working_links_with_geo_ttfb)
     if written > 0:
         create_base64_subscription()
     else:
         logging.warning("Нет серверов с флагами – Base64 не создана.")
-    logging.info(f"📊 Итог: {len(working_links_with_geo)} рабочих с флагами из {len(all_links)} проверенных")
+    logging.info(f"📊 Итог: {written} рабочих с флагами из {len(all_links)} проверенных")
     logging.info("🏁 Работа завершена")
 
 if __name__ == "__main__":
