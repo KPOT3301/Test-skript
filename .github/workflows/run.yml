@@ -2,137 +2,80 @@ name: VPN Key Checker
 
 on:
   schedule:
-    - cron: '0 3 * * *'   # каждый день в 03:00 UTC
-  workflow_dispatch:        # ручной запуск
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 jobs:
 
-  # ────────────────────────────────────────────────────────────
-  # JOB 1: Скачать подписки, дедублировать, разбить на чанки
-  # ────────────────────────────────────────────────────────────
+  # ── 1. Скачать, дедублировать, разбить на чанки ─────────────
   prepare:
     name: 📡 Prepare
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run prepare
-        run: python GENERATOR.py prepare
-
-      - name: Upload chunks
-        uses: actions/upload-artifact@v4
+      - run: pip install -r requirements.txt
+      - run: python GENERATOR.py prepare
+      - uses: actions/upload-artifact@v4
         with:
           name: chunks
           path: chunks/
           retention-days: 1
 
-
-  # ────────────────────────────────────────────────────────────
-  # JOB 2: Проверить ключи (20 параллельных джобов)
-  # ────────────────────────────────────────────────────────────
+  # ── 2. Проверить ключи (20 параллельных джобов) ─────────────
   check:
-    name: 🔍 Check chunk ${{ matrix.chunk }}
+    name: 🔍 Check ${{ matrix.chunk }}
     needs: prepare
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
       max-parallel: 20
       matrix:
         chunk: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Install sing-box
-        run: |
-          LATEST=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-            | grep '"tag_name"' | cut -d '"' -f 4)
-          VERSION=${LATEST#v}
-          URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST}/sing-box-${VERSION}-linux-amd64.tar.gz"
-          echo "Downloading sing-box ${LATEST}..."
-          curl -L "$URL" -o sing-box.tar.gz
-          tar -xzf sing-box.tar.gz
-          sudo mv "sing-box-${VERSION}-linux-amd64/sing-box" /usr/local/bin/sing-box
-          sudo chmod +x /usr/local/bin/sing-box
-          sing-box version
-
-      - name: Download chunks
-        uses: actions/download-artifact@v4
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
         with:
           name: chunks
           path: chunks/
-
-      - name: Check chunk ${{ matrix.chunk }}
-        run: |
-          IDX=$(printf "%02d" ${{ matrix.chunk }})
-          python GENERATOR.py check ${{ matrix.chunk }}
-
-      - name: Upload result
-        uses: actions/upload-artifact@v4
+      - run: python GENERATOR.py check ${{ matrix.chunk }}
+      - uses: actions/upload-artifact@v4
         with:
           name: result-${{ matrix.chunk }}
           path: results/
           retention-days: 1
 
-
-  # ────────────────────────────────────────────────────────────
-  # JOB 3: Собрать результаты и закоммитить
-  # ────────────────────────────────────────────────────────────
+  # ── 3. Собрать результаты и закоммитить ─────────────────────
   merge:
     name: 🔀 Merge & Commit
     needs: check
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Download all results
-        uses: actions/download-artifact@v4
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
         with:
           pattern: result-*
           path: results/
           merge-multiple: true
-
-      - name: Merge results
-        run: python GENERATOR.py merge
-
-      - name: Commit subscriptions
+      - run: python GENERATOR.py merge
+      - name: Commit
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add subscription.txt subscription_base64.txt
           git diff --cached --quiet \
-            && echo "No changes to commit" \
+            && echo "No changes" \
             || git commit -m "chore: update subscriptions [$(date -u '+%Y-%m-%d %H:%M UTC')]"
           git push
