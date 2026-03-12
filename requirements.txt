@@ -1,2 +1,5 @@
-aiohttp>=3.9.0
-aiohttp-socks>=0.8.0
+# requirements.txt
+requests
+pysocks
+geoip2
+tzdata
