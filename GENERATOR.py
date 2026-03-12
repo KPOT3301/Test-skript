@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-# GENERATOR.py – Финальная версия с групповым логированием и строгой проверкой на все реальные сайты.
-# Увеличена задержка запуска sing-box до 5 секунд, таймаут до 30 секунд.
-# Условие: должны открываться все три реальных сайта (Google, YouTube, GitHub).
+# GENERATOR.py – Финальная версия с групповым логированием.
+# Проверка реальных сайтов: только Google (https://www.google.com/generate_204).
 
 import os
 import re
@@ -95,7 +94,7 @@ TCP_MAX_WORKERS = 400
 TLS_CHECK_TIMEOUT = 5
 TLS_MAX_WORKERS = 100
 
-# Реальная проверка (увеличенные таймауты)
+# Реальная проверка
 SOCKS_BASE_PORT = 10000
 SOCKS_PORT_RANGE = 1000
 REAL_CHECK_TIMEOUT = 30
@@ -108,11 +107,9 @@ FAST_TEST_URLS = [
     "http://www.gstatic.com/generate_204"
 ]
 
-# Реальные сайты – должны быть доступны ВСЕ
+# Реальные сайты – теперь только Google
 REAL_SITES = [
-    "https://www.google.com/generate_204",
-    "https://www.youtube.com/generate_204",
-    "https://www.github.com"
+    "https://www.google.com/generate_204"
 ]
 
 MAX_LATENCY_MS = 300
@@ -620,7 +617,7 @@ def check_with_singbox(link, fast_urls, real_urls, fast_timeout=REAL_CHECK_TIMEO
     """
     Запускает sing-box для данной ссылки.
     Сначала проверяет быстрые URL (fast_urls). Если ни один не прошёл, возвращает False.
-    Затем проверяет все реальные сайты (real_urls). Должны открыться все.
+    Затем проверяет реальные сайты (real_urls) – теперь только Google.
     """
     config_dict = parse_link(link)
     if not config_dict:
@@ -678,7 +675,7 @@ def check_with_singbox(link, fast_urls, real_urls, fast_timeout=REAL_CHECK_TIMEO
             logging.debug(f"Быстрые URL не открылись для {shorten_link(link)}")
             return False
 
-        # Проверка реальных сайтов – должны открыться все
+        # Проверка реальных сайтов – теперь только Google, но оставляем цикл на случай расширения
         for url in real_urls:
             try:
                 resp = requests.get(
@@ -692,7 +689,6 @@ def check_with_singbox(link, fast_urls, real_urls, fast_timeout=REAL_CHECK_TIMEO
                 logging.debug(f"Ошибка при запросе реального сайта {url} для {shorten_link(link)}: {e}")
                 return False
 
-        # Все проверки пройдены
         return True
 
     except Exception as e:
@@ -771,20 +767,17 @@ def filter_working_links(links):
             if future.result():
                 tls_passed.append((link, flag, city, parsed))
                 tls_ok += 1
-                # можно не логировать каждый успех, но для отладки оставим групповой
             else:
                 tls_fail += 1
-                # логируем только групповой
             if tls_processed % 10 == 0:
                 logging.info(f"TLS прогресс: обработано {tls_processed}, OK {tls_ok}, FAIL {tls_fail}")
 
-    # Финальный лог TLS
     logging.info(f"✅ TLS-проверка завершена. OK {tls_ok}, FAIL {tls_fail}, всего {tls_processed}")
     if not tls_passed:
         return []
 
     # Этап 2: реальная проверка через sing-box с расширенной проверкой (групповой лог)
-    logging.info(f"🧪 Этап 2: Реальная проверка {len(tls_passed)} ссылок (быстрые URL + все реальные сайты)...")
+    logging.info(f"🧪 Этап 2: Реальная проверка {len(tls_passed)} ссылок (быстрые URL + Google)...")
     working_links_with_geo = []
     stage_total = len(tls_passed)
     stage_current = 0
@@ -816,12 +809,10 @@ def filter_working_links(links):
             else:
                 real_fail += 1
 
-            # Логируем каждые 10
             if stage_current % 10 == 0:
                 log_msg = f"Реальная проверка прогресс: {stage_current}/{stage_total}, OK {real_ok}, FAIL {real_fail}"
                 logging.info(log_msg)
 
-    # Финальный лог реальной проверки
     logging.info(f"📊 Реальная проверка завершена. Рабочих: {len(working_links_with_geo)}/{stage_total}, OK {real_ok}, FAIL {real_fail}")
     return working_links_with_geo
 
@@ -887,7 +878,7 @@ def check_singbox_available():
 # ---------- ГЛАВНАЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, TLS=5с, реальная=30с, задержка sing-box=5с, проверка на все реальные сайты)")
+    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, TLS=5с, реальная=30с, задержка sing-box=5с, проверка на Google)")
     if not check_singbox_available():
         logging.error("sing-box обязателен. Завершение.")
         return
