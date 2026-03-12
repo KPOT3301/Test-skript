@@ -13,3 +13,5 @@ https://gist.githubusercontent.com/sevushyamamoto-stack/9341be7a058e132154d407d0
 # LimeVPNPaser
 https://raw.githubusercontent.com/LimeHi/LimeVPNGenerator/main/Keys.txt?v=1
 
+# openray
+https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/1.txt
