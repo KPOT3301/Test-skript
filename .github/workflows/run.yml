@@ -23,8 +23,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
-        # Убедитесь, что в requirements.txt есть geoip2, requests, urllib3 и т.д.
-        # Если нет, добавьте: geoip2 requests urllib3
+        # Убедитесь, что в requirements.txt есть: requests geoip2 urllib3
 
       - name: Cache GeoIP database
         id: cache-geoip
