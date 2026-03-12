@@ -1,1 +1,56 @@
+name: Check Vless Servers
 
+on:
+  schedule:
+    - cron: '0 19 * * *'   # 19:00 UTC = 00:00 Оренбург (UTC+5)
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # нужна полная история для корректного pull/rebase
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download and install sing-box
+        run: |
+          # Определяем URL последней версии sing-box для linux-amd64
+          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep "browser_download_url.*linux-amd64" | cut -d '"' -f 4)
+          if [ -z "$LATEST_URL" ]; then
+            echo "Не удалось получить ссылку на последнюю версию sing-box"
+            exit 1
+          fi
+          wget -q "$LATEST_URL" -O sing-box.tar.gz
+          tar -xzf sing-box.tar.gz
+          # Копируем бинарник в текущую папку
+          find . -name "sing-box" -type f -exec cp {} ./sing-box \;
+          chmod +x ./sing-box
+          # Добавляем текущую папку в PATH, чтобы команда 'sing-box' была доступна
+          echo "$(pwd)" >> $GITHUB_PATH
+
+      - name: Run GENERATOR.py
+        run: python GENERATOR.py
+
+      - name: Commit and push if changed
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add subscription.txt subscription_base64.txt
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Auto-update subscription files"
+            git pull --rebase origin main
+            git push
+          fi
