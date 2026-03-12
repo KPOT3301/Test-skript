@@ -18,11 +18,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
+          cache: 'pip'   # кэширование зависимостей pip
 
       - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
+        # Убедитесь, что в requirements.txt есть geoip2, requests, urllib3 и т.д.
+        # Если нет, добавьте: geoip2 requests urllib3
 
       - name: Cache GeoIP database
         id: cache-geoip
@@ -62,9 +64,9 @@ jobs:
           rm -f sing-box.tar.gz
           rm -rf $(find . -maxdepth 1 -type d -name "sing-box-*" 2>/dev/null)
 
-      - name: Run GENERATOR.py with DEBUG
+      - name: Run GENERATOR.py
         env:
-          LOG_LEVEL: DEBUG   # <--- Включаем подробный лог
+          LOG_LEVEL: INFO   # можно DEBUG для детализации
         run: python GENERATOR.py
 
       - name: Commit and push if changed
