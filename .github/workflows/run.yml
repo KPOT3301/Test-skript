@@ -1,1 +1,44 @@
+name: VPN Generator
 
+on:
+
+  schedule:
+    - cron: "0 */6 * * *"
+
+  workflow_dispatch:
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.11
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Install sing-box
+      run: |
+        curl -fsSL https://sing-box.app/install.sh | bash
+
+    - name: Run generator
+      run: |
+        python GENERATOR.py
+
+    - name: Commit results
+      run: |
+        git config --global user.name github-actions
+        git config --global user.email actions@github.com
+        git add subscription.txt subscription_base64.txt
+        git commit -m "update subscription" || echo "no changes"
+        git push
