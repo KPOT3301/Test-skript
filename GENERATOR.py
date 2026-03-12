@@ -1,361 +1,308 @@
 #!/usr/bin/env python3
-
-import requests
+import asyncio
 import base64
-import socket
+import json
+import os
 import ssl
+import socket
 import subprocess
 import tempfile
-import os
-import logging
-import re
-from datetime import datetime
+import time
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
+
+import aiohttp
 
 # =========================
 # CONFIG
 # =========================
 
-THREADS = 100
+MAX_CONCURRENT = 400
+THREADS = 20
+
 TCP_TIMEOUT = 3
-TLS_TIMEOUT = 3
+TLS_TIMEOUT = 4
 
-INPUT_FILE = "sources.txt"
+INPUT_SOURCES = "sources.txt"
 
-OUTPUT_TXT = "subscription.txt"
-OUTPUT_BASE64 = "subscription_base64.txt"
+OUT_TXT = "subscription.txt"
+OUT_B64 = "subscription_base64.txt"
 
-GEOIP_API = "http://ip-api.com/json/"
-
-# =========================
-# LOGGING
-# =========================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+TEST_URL = "https://www.google.com/generate_204"
 
 # =========================
-# FLAG DATABASE
+# LOGGER
 # =========================
 
-country_flags = {
-"DE":"🇩🇪","FI":"🇫🇮","US":"🇺🇸","GB":"🇬🇧","NL":"🇳🇱","FR":"🇫🇷",
-"CA":"🇨🇦","RU":"🇷🇺","JP":"🇯🇵","SG":"🇸🇬","KR":"🇰🇷","HK":"🇭🇰",
-"TR":"🇹🇷","UA":"🇺🇦","PL":"🇵🇱","CZ":"🇨🇿","IT":"🇮🇹","ES":"🇪🇸"
-}
+class Log:
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    BLUE = "\033[94m"
+    YELLOW = "\033[93m"
+    END = "\033[0m"
 
-flag_regex = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
+    @staticmethod
+    def node_header(i, proto, host, port):
+        print(f"\n{Log.BLUE}[{i:05d}] {proto.upper()} {host}:{port}{Log.END}")
+
+    @staticmethod
+    def step_ok(name, msg=""):
+        print(f"   ├ {Log.GREEN}{name:<8} ✔{Log.END} {msg}")
+
+    @staticmethod
+    def step_fail(name, msg=""):
+        print(f"   ├ {Log.RED}{name:<8} ✖{Log.END} {msg}")
+
+    @staticmethod
+    def result_ok():
+        print(f"   └ {Log.GREEN}RESULT   WORKING{Log.END}")
+
+    @staticmethod
+    def result_fail():
+        print(f"   └ {Log.RED}RESULT   FAIL{Log.END}")
+
+    @staticmethod
+    def info(msg):
+        print(f"{Log.BLUE}[INFO]{Log.END} {msg}")
 
 # =========================
-# DOWNLOAD SUBSCRIPTIONS
+# DOWNLOAD SOURCES
 # =========================
 
-def download_subscription(url):
-
+async def fetch(session, url):
     try:
-
-        r = requests.get(url,timeout=20)
-
-        if r.status_code != 200:
-            return []
-
-        text = r.text.strip()
-
-        try:
-            decoded = base64.b64decode(text).decode()
-            if "://" in decoded:
-                text = decoded
-        except:
-            pass
-
-        return text.splitlines()
-
+        async with session.get(url, timeout=20) as r:
+            return await r.text()
     except:
-        return []
+        Log.step_fail("SOURCE", f"Failed to fetch {url}")
+        return ""
 
+async def load_sources():
+    urls = [x.strip() for x in open(INPUT_SOURCES) if x.strip()]
+    Log.info(f"Sources found: {len(urls)}")
+    nodes = []
+
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch(session, u) for u in urls]
+        results = await asyncio.gather(*tasks)
+
+        for data in results:
+            if not data:
+                continue
+            data = data.strip()
+            try:
+                decoded = base64.b64decode(data).decode()
+                if "://" in decoded:
+                    nodes.extend(decoded.splitlines())
+                    continue
+            except:
+                pass
+            nodes.extend(data.splitlines())
+    return nodes
 
 # =========================
-# PARSE HOST PORT
+# PARSER
 # =========================
 
-def parse_host_port(link):
-
+def parse_node(link):
     try:
+        if link.startswith("vmess://"):
+            raw = base64.b64decode(link[8:]).decode()
+            j = json.loads(raw)
+            return j["add"], int(j["port"]), True
 
-        if "@" not in link:
-            return None,None
+        if link.startswith("vless://"):
+            p = urlparse(link)
+            tls = "security=tls" in link
+            return p.hostname, p.port, tls
 
-        part = link.split("@")[1]
+        if link.startswith("trojan://"):
+            p = urlparse(link)
+            return p.hostname, p.port, True
 
-        host = part.split(":")[0]
-        port = int(part.split(":")[1].split("?")[0])
+        if link.startswith("ss://"):
+            p = urlparse(link)
+            return p.hostname, p.port, False
 
-        return host,port
-
-    except:
-        return None,None
-
-
-# =========================
-# TCP CHECK
-# =========================
-
-def tcp_check(host,port):
-
-    try:
-
-        sock = socket.create_connection((host,port),TCP_TIMEOUT)
-
-        sock.close()
-
-        return True
-
-    except:
-
-        return False
-
-
-# =========================
-# TLS CHECK
-# =========================
-
-def tls_check(host,port):
-
-    try:
-
-        context = ssl.create_default_context()
-
-        sock = socket.create_connection((host,port),TLS_TIMEOUT)
-
-        ssock = context.wrap_socket(sock,server_hostname=host)
-
-        ssock.close()
-
-        return True
-
-    except:
-
-        return False
-
-
-# =========================
-# GEOIP
-# =========================
-
-def get_country_flag(ip):
-
-    try:
-
-        r = requests.get(GEOIP_API+ip,timeout=5)
-
-        data = r.json()
-
-        code = data.get("countryCode")
-
-        if code in country_flags:
-
-            return country_flags[code]
+        if link.startswith("hysteria2://"):
+            p = urlparse(link)
+            return p.hostname, p.port, True
 
     except:
         pass
-
-    return None
-
+    return None, None, False
 
 # =========================
-# FLAG ADD
+# TESTS
 # =========================
 
-def add_flag_if_missing(link):
-
-    if flag_regex.search(link):
-        return link
-
-    host,_ = parse_host_port(link)
-
-    if not host:
-        return None
-
-    flag = get_country_flag(host)
-
-    if not flag:
-        return None
-
-    if "#" in link:
-        link = link + f" | {flag} |"
-    else:
-        link = link + f"#{flag}"
-
-    return link
-
-
-# =========================
-# SINGBOX CHECK
-# =========================
-
-def singbox_check(link):
-
+async def dns_test(host):
     try:
-
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-
-            config = {
-                "log":{"disabled":True},
-                "outbounds":[{"type":"direct"}]
-            }
-
-            path = f.name
-
-            f.write(str(config).encode())
-
-        p = subprocess.run(
-            ["sing-box","run","-c",path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10
-        )
-
-        os.remove(path)
-
-        return p.returncode == 0
-
+        loop = asyncio.get_event_loop()
+        ip = await loop.getaddrinfo(host, None)
+        return True, ip[0][4][0]
     except:
+        return False, None
 
+async def tcp_test(host, port):
+    start = time.time()
+    try:
+        fut = asyncio.open_connection(host, port)
+        reader, writer = await asyncio.wait_for(fut, timeout=TCP_TIMEOUT)
+        writer.close()
+        latency = int((time.time() - start) * 1000)
+        return True, latency
+    except:
+        return False, None
+
+def tls_test(host, port):
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, port), TLS_TIMEOUT) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host):
+                return True
+    except:
         return False
 
+async def internet_test(link):
+    config = {
+        "log": {"level": "fatal"},
+        "inbounds": [{
+            "type": "socks",
+            "listen": "127.0.0.1",
+            "listen_port": 1080
+        }],
+        "outbounds": [
+            {"type": "direct"}
+        ]
+    }
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "config.json")
+        with open(path, "w") as f:
+            json.dump(config, f)
+        try:
+            proc = subprocess.Popen(
+                ["sing-box", "run", "-c", path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            await asyncio.sleep(1)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    TEST_URL,
+                    proxy="socks5://127.0.0.1:1080",
+                    timeout=10
+                ) as r:
+                    ok = r.status == 204
+            proc.kill()
+            return ok
+        except:
+            return False
+
+# =========================
+# NODE CHECK
+# =========================
+
+async def check_node(link, sem, executor, stats, idx):
+    async with sem:
+        host, port, tls = parse_node(link)
+        proto = link.split("://")[0]
+        Log.node_header(idx, proto, host, port)
+
+        # DNS
+        ok, ip = await dns_test(host)
+        if not ok:
+            Log.step_fail("DNS", "resolve error")
+            Log.result_fail()
+            stats["fail"] += 1
+            return None
+        Log.step_ok("DNS", ip)
+
+        # TCP
+        ok, latency = await tcp_test(host, port)
+        if not ok:
+            Log.step_fail("TCP", "connection failed")
+            Log.result_fail()
+            stats["fail"] += 1
+            return None
+        Log.step_ok("TCP", f"{latency}ms")
+
+        # TLS
+        if tls:
+            loop = asyncio.get_event_loop()
+            ok = await loop.run_in_executor(executor, tls_test, host, port)
+            if not ok:
+                Log.step_fail("TLS", "handshake failed")
+                Log.result_fail()
+                stats["fail"] += 1
+                return None
+            Log.step_ok("TLS", "handshake ok")
+
+        # INTERNET
+        ok = await internet_test(link)
+        if not ok:
+            Log.step_fail("INTERNET", "no access")
+            Log.result_fail()
+            stats["fail"] += 1
+            return None
+        Log.step_ok("INTERNET", "204 google")
+
+        Log.result_ok()
+        stats["ok"] += 1
+        return link
 
 # =========================
 # MAIN
 # =========================
 
-def main():
+async def main():
+    Log.info("Loading subscriptions...")
+    nodes = await load_sources()
+    nodes = list(set([x.strip() for x in nodes if "://" in x]))
+    Log.info(f"Total nodes loaded: {len(nodes)}")
 
-    logging.info("🚀 START GENERATOR")
+    sem = asyncio.Semaphore(MAX_CONCURRENT)
+    executor = ThreadPoolExecutor(max_workers=THREADS)
+    stats = {"ok": 0, "fail": 0, "total": len(nodes)}
 
-    # load sources
+    tasks = [
+        check_node(n, sem, executor, stats, idx+1)
+        for idx, n in enumerate(nodes)
+    ]
 
-    with open(INPUT_FILE) as f:
+    results = []
+    for f in asyncio.as_completed(tasks):
+        r = await f
+        if r:
+            results.append(r)
+        else:
+            stats["fail"] += 0  # уже учтено внутри check_node
 
-        sources = [x.strip() for x in f if x.strip()]
+    # Save results
+    with open(OUT_TXT, "w") as f:
+        f.write("\n".join(results))
+    with open(OUT_B64, "w") as f:
+        f.write(base64.b64encode("\n".join(results).encode()).decode())
 
-    logging.info(f"📡 SOURCES: {len(sources)}")
+    # ======================
+    # SUMMARY STATISTICS
+    # ======================
+    total = stats["total"]
+    ok = stats["ok"]
+    fail = stats["fail"]
+    percent = (ok / total) * 100 if total else 0
 
-    # download subscriptions
+    print("\n" + "═" * 40)
+    print("CHECK COMPLETE")
+    print(f"TOTAL     {total}")
+    print(f"WORKING   {ok}")
+    print(f"FAILED    {fail}")
+    print(f"SUCCESS   {percent:.2f}%")
+    print("═" * 40)
 
-    all_links = []
-
-    with ThreadPoolExecutor(max_workers=THREADS) as ex:
-
-        for result in ex.map(download_subscription,sources):
-
-            all_links.extend(result)
-
-    logging.info(f"⬇️ DOWNLOADED KEYS: {len(all_links)}")
-
-    # remove duplicates
-
-    unique = list(set(all_links))
-
-    logging.info(f"♻️ UNIQUE KEYS: {len(unique)}")
-
-    # TCP check
-
-    tcp_alive = []
-
-    def tcp_worker(link):
-
-        host,port = parse_host_port(link)
-
-        if not host:
-            return None
-
-        if tcp_check(host,port):
-            return link
-
-    with ThreadPoolExecutor(max_workers=THREADS) as ex:
-
-        for r in ex.map(tcp_worker,unique):
-
-            if r:
-                tcp_alive.append(r)
-
-    logging.info(f"🌐 TCP OK: {len(tcp_alive)}")
-
-    # TLS check
-
-    tls_alive = []
-
-    def tls_worker(link):
-
-        host,port = parse_host_port(link)
-
-        if not host:
-            return None
-
-        if tls_check(host,port):
-            return link
-
-    with ThreadPoolExecutor(max_workers=THREADS) as ex:
-
-        for r in ex.map(tls_worker,tcp_alive):
-
-            if r:
-                tls_alive.append(r)
-
-    logging.info(f"🔐 TLS OK: {len(tls_alive)}")
-
-    # add flags
-
-    flagged = []
-
-    with ThreadPoolExecutor(max_workers=50) as ex:
-
-        for r in ex.map(add_flag_if_missing,tls_alive):
-
-            if r:
-                flagged.append(r)
-
-    logging.info(f"🏳️ KEYS WITH FLAGS: {len(flagged)}")
-
-    # singbox check
-
-    working = []
-
-    with ThreadPoolExecutor(max_workers=30) as ex:
-
-        results = ex.map(singbox_check,flagged)
-
-        for link,ok in zip(flagged,results):
-
-            if ok:
-                working.append(link)
-
-    logging.info(f"✅ WORKING KEYS: {len(working)}")
-
-    # write output
-
-    date = datetime.now().strftime("%d-%m-%Y")
-
-    header = f"""#profile-title:🇷🇺КРОТовыеТОННЕЛИ🇷🇺
-#subscription-userinfo:upload=0; download=0; total=0; expire=0
-#profile-update-interval:1
-#support-url:🇷🇺КРОТовыеТОННЕЛИ🇷🇺
-#profile-web-page-url:🇷🇺КРОТовыеТОННЕЛИ🇷🇺
-#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(working)} | ОБНОВЛЕНО 📅 {date}
-"""
-
-    text = header + "\n".join(working)
-
-    with open(OUTPUT_TXT,"w",encoding="utf8") as f:
-        f.write(text)
-
-    with open(OUTPUT_BASE64,"w") as f:
-        f.write(base64.b64encode(text.encode()).decode())
-
-    logging.info("💾 SUBSCRIPTIONS SAVED")
-
+# =========================
+# RUN
+# =========================
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
