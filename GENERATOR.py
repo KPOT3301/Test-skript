@@ -96,7 +96,7 @@ OUTPUT_OTHER_BASE64_FILE = "subscription_OTHER_base64.txt"
 
 # ---------- Общие сетевые настройки ----------
 REQUEST_TIMEOUT = 10
-XRAY_CORE_PATH = "xray"
+SING_BOX_CORE_PATH = "sing-box"                # изменено с XRAY_CORE_PATH
 
 # ---------- Список User-Agent для случайного выбора ----------
 USER_AGENTS = [
@@ -526,150 +526,123 @@ def resolve_ip_for_link(link):
     ip = resolve_host(host)
     return link, ip
 
-# ---------- СОЗДАНИЕ КОНФИГА XRAY ----------
-def create_xray_config(config, socks_port):
-    base_config = {
-        "log": {"loglevel": "error"},
-        "inbounds": [{
-            "port": socks_port,
-            "listen": "127.0.0.1",
-            "protocol": "socks",
-            "settings": {"auth": "noauth", "udp": True, "ip": "127.0.0.1"}
-        }],
-        "outbounds": []
-    }
-    protocol = config['protocol']
+# ---------- СОЗДАНИЕ КОНФИГА SING-BOX ----------
+def create_singbox_config(config, socks_port):
+    """
+    Формирует конфигурацию sing-box на основе распарсенных данных ссылки.
+    Возвращает словарь (JSON) или None при ошибке.
+    """
+    outbound = {"type": config['protocol']}
+    # общие поля server / server_port
+    outbound["server"] = config['host']
+    outbound["server_port"] = config['port']
 
-    if protocol == 'vless':
-        outbound = {
-            "protocol": "vless",
-            "settings": {
-                "vnext": [{
-                    "address": config['host'],
-                    "port": config['port'],
-                    "users": [{
-                        "id": config['uuid'],
-                        "encryption": config.get('encryption', 'none'),
-                        "flow": config.get('flow', '')
-                    }]
-                }]
-            },
-            "streamSettings": {
-                "network": config.get('type', 'tcp'),
-                "security": config.get('security', 'none')
-            }
-        }
-        if config['security'] == 'tls':
-            outbound["streamSettings"]["tlsSettings"] = {
-                "serverName": config.get('sni', config['host']),
-                "fingerprint": config.get('fp', 'chrome'),
-                "allowInsecure": False
-            }
-        elif config['security'] == 'reality':
-            outbound["streamSettings"]["realitySettings"] = {
-                "serverName": config.get('sni', config['host']),
-                "fingerprint": config.get('fp', 'random'),
-                "publicKey": config.get('pbk', ''),
-                "shortId": config.get('sid', ''),
-                "spiderX": config.get('spx', '/')
-            }
-        if config.get('type') == 'ws':
-            outbound["streamSettings"]["wsSettings"] = {
-                "path": config.get('path', '/'),
-                "headers": {"Host": config.get('host_header', config['host'])}
-            }
+    if config['protocol'] == 'vless':
+        outbound["uuid"] = config['uuid']
+        outbound["flow"] = config.get('flow', '')
 
-    elif protocol == 'vmess':
-        outbound = {
-            "protocol": "vmess",
-            "settings": {
-                "vnext": [{
-                    "address": config['host'],
-                    "port": config['port'],
-                    "users": [{
-                        "id": config['uuid'],
-                        "security": config.get('security', 'auto')
-                    }]
-                }]
-            },
-            "streamSettings": {
-                "network": config.get('type', 'tcp'),
-                "security": config.get('tls', False) and "tls" or "none"
+        # TLS / Reality
+        if config.get('security') in ('tls', 'reality'):
+            tls_config = {
+                "enabled": True,
+                "server_name": config.get('sni', config['host'])
             }
-        }
-        if config.get('tls'):
-            outbound["streamSettings"]["tlsSettings"] = {
-                "serverName": config.get('sni', config['host']),
-                "allowInsecure": config.get('allow_insecure', False)
-            }
-        if config.get('type') == 'ws':
-            outbound["streamSettings"]["wsSettings"] = {
-                "path": config.get('path', '/'),
-                "headers": {"Host": config.get('host_header', config['host'])}
-            }
-
-    elif protocol == 'ss':
-        outbound = {
-            "protocol": "shadowsocks",
-            "settings": {
-                "servers": [{
-                    "address": config['host'],
-                    "port": config['port'],
-                    "method": config['method'],
-                    "password": config['password']
-                }]
-            },
-            "streamSettings": {"network": "tcp", "security": "none"}
-        }
-
-    elif protocol == 'trojan':
-        outbound = {
-            "protocol": "trojan",
-            "settings": {
-                "servers": [{
-                    "address": config['host'],
-                    "port": config['port'],
-                    "password": config['password']
-                }]
-            },
-            "streamSettings": {
-                "network": config.get('network', 'tcp'),
-                "security": config.get('security', 'tls')
-            }
-        }
-        if config.get('security') == 'tls':
-            outbound["streamSettings"]["tlsSettings"] = {
-                "serverName": config.get('sni', config['host']),
-                "allowInsecure": config.get('allow_insecure', False)
-            }
-
-    elif protocol == 'hysteria2':
-        outbound = {
-            "protocol": "hysteria2",
-            "settings": {
-                "server": config['host'],
-                "port": config['port'],
-                "password": config['password'],
-                "tls": {
-                    "sni": config.get('sni', config['host']),
-                    "insecure": config.get('allow_insecure', False)
+            if config['security'] == 'reality':
+                tls_config["reality"] = {
+                    "enabled": True,
+                    "public_key": config.get('pbk', ''),
+                    "short_id": config.get('sid', '')
                 }
-            }
-        }
-        if config.get('up') or config.get('down'):
-            outbound["settings"]["bandwidth"] = {}
-            if config.get('up'):
-                outbound["settings"]["bandwidth"]["up"] = config['up']
-            if config.get('down'):
-                outbound["settings"]["bandwidth"]["down"] = config['down']
-        if config.get('obfs'):
-            outbound["settings"]["obfs"] = config['obfs']
+            # utls fingerprint
+            if config.get('fp'):
+                tls_config["utls"] = {"enabled": True, "fingerprint": config['fp']}
+            outbound["tls"] = tls_config
 
+        # Transport (network)
+        if config.get('type') and config['type'] != 'tcp':
+            transport = {"type": config['type']}
+            if config['type'] == 'ws':
+                transport["path"] = config.get('path', '/')
+                if config.get('host_header'):
+                    transport["headers"] = {"Host": config['host_header']}
+            # можно добавить grpc, httpupgrade и т.п.
+            outbound["transport"] = transport
+
+    elif config['protocol'] == 'vmess':
+        outbound["uuid"] = config['uuid']
+        outbound["security"] = config.get('security', 'auto')
+        outbound["alter_id"] = 0
+
+        if config.get('tls'):
+            tls_config = {"enabled": True, "server_name": config.get('sni', config['host'])}
+            if config.get('allow_insecure'):
+                tls_config["insecure"] = True
+            outbound["tls"] = tls_config
+
+        if config.get('type') and config['type'] != 'tcp':
+            transport = {"type": config['type']}
+            if config['type'] == 'ws':
+                transport["path"] = config.get('path', '/')
+                if config.get('host_header'):
+                    transport["headers"] = {"Host": config['host_header']}
+            outbound["transport"] = transport
+
+    elif config['protocol'] == 'ss':
+        outbound["method"] = config['method']
+        outbound["password"] = config['password']
+
+    elif config['protocol'] == 'trojan':
+        outbound["password"] = config['password']
+
+        if config.get('security') == 'tls' or config.get('tls'):
+            tls_config = {"enabled": True, "server_name": config.get('sni', config['host'])}
+            if config.get('allow_insecure'):
+                tls_config["insecure"] = True
+            outbound["tls"] = tls_config
+
+        if config.get('network') and config['network'] != 'tcp':
+            transport = {"type": config['network']}
+            if config['network'] == 'ws' and config.get('path'):
+                transport["path"] = config['path']
+            outbound["transport"] = transport
+
+    elif config['protocol'] == 'hysteria2':
+        outbound["password"] = config['password']
+
+        tls_config = {"enabled": True, "server_name": config.get('sni', config['host'])}
+        if config.get('allow_insecure'):
+            tls_config["insecure"] = True
+        outbound["tls"] = tls_config
+
+        # up / down bandwidth (mbps)
+        if config.get('up'):
+            up_str = config['up'].lower().replace('mbps', '').replace('m', '').strip()
+            try:
+                outbound["up_mbps"] = int(float(up_str))
+            except:
+                pass
+        if config.get('down'):
+            down_str = config['down'].lower().replace('mbps', '').replace('m', '').strip()
+            try:
+                outbound["down_mbps"] = int(float(down_str))
+            except:
+                pass
+
+        if config.get('obfs'):
+            outbound["obfs"] = {"type": config['obfs']}
     else:
         return None
 
-    base_config["outbounds"].append(outbound)
-    return base_config
+    # Полный конфиг с inbound SOCKS5
+    return {
+        "log": {"level": "error"},
+        "inbounds": [{
+            "type": "socks",
+            "listen": "127.0.0.1",
+            "listen_port": socks_port
+        }],
+        "outbounds": [outbound]
+    }
 
 # ---------- TCP ПРОВЕРКА (3 попытки) ----------
 def check_tcp(link):
@@ -790,18 +763,18 @@ def check_real(link):
         return (link, False)
 
     socks_port = find_free_port()
-    xray_config = create_xray_config(config_dict, socks_port)
-    if not xray_config:
+    singbox_config = create_singbox_config(config_dict, socks_port)
+    if not singbox_config:
         return (link, False)
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         config_path = f.name
-        json.dump(xray_config, f, indent=2)
+        json.dump(singbox_config, f, indent=2)
 
     process = None
     try:
         process = subprocess.Popen(
-            [XRAY_CORE_PATH, 'run', '-config', config_path],
+            [SING_BOX_CORE_PATH, 'run', '-c', config_path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         time.sleep(1)
@@ -1009,12 +982,12 @@ def create_base64_subscription_for_file(input_file, output_file):
     except Exception as e:
         logging.error(f"❌ Ошибка создания Base64 для {input_file}: {e}")
 
-def check_xray_available():
+def check_singbox_available():
     try:
-        result = subprocess.run([XRAY_CORE_PATH, '--version'], capture_output=True, text=True, timeout=5)
+        result = subprocess.run([SING_BOX_CORE_PATH, 'version'], capture_output=True, text=True, timeout=5)
         return result.returncode == 0
     except FileNotFoundError:
-        logging.error(f"❌ Xray-core не найден по пути '{XRAY_CORE_PATH}'")
+        logging.error(f"❌ sing-box не найден по пути '{SING_BOX_CORE_PATH}'")
         return False
     except Exception:
         return False
@@ -1022,8 +995,8 @@ def check_xray_available():
 # ---------- ГЛАВНАЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    if not check_xray_available():
-        logging.error("Xray-core обязателен. Завершение.")
+    if not check_singbox_available():
+        logging.error("sing-box обязателен. Завершение.")
         return
 
     sources = read_sources()
