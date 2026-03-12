@@ -8,6 +8,7 @@
 # Замер времени HTTP/HTTPS запросов и отсев медленных.
 # Расширен список тестовых URL.
 # В announce используется только дата (без секунд) для меньшего числа коммитов.
+# ИЗМЕНЕНИЕ: убрана проверка наличия флага – все серверы, прошедшие TCP, участвуют в реальной проверке.
 
 import os
 import re
@@ -788,14 +789,13 @@ def filter_working_links(links):
     if not tcp_success:
         return []
 
-    # Геоданные
+    # Геоданные – теперь добавляем все серверы, даже если флаг не определён
     candidates = []  # (link, flag, city, country_code, latency, ip)
     for link, ip, latency in tcp_success:
         flag, city, country_code = get_geo_info(ip) if ip else ("", "", "")
-        if flag:
-            candidates.append((link, flag, city, country_code, latency, ip))
+        candidates.append((link, flag, city, country_code, latency, ip))
 
-    logging.info(f"🧾 Серверов с флагами: {len(candidates)}")
+    logging.info(f"🧾 Серверов после TCP: {len(candidates)}")
 
     if not candidates:
         return []
