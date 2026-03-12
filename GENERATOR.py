@@ -5,6 +5,7 @@
 # Добавлен вывод количества ключей из каждого источника в процессе сбора.
 # После TCP‑проверки оставляем только уникальные пары (IP, порт) с наименьшей задержкой.
 # Подавлены предупреждения InsecureRequestWarning.
+# Подписка сортируется: Россия, Европа, остальные.
 
 import os
 import re
@@ -176,36 +177,39 @@ def gather_all_links(sources):
     logging.info(f"🔍 Сбор ссылок из {len(sources)} источников...")
     all_links = set()
     for idx, src in enumerate(sources, 1):
-        # Укорачиваем URL для лога
         short_src = src[:60] + ('...' if len(src) > 60 else '')
-
-        # Прямые ссылки (уже готовые ключи)
         if src.startswith(('vless://', 'ss://', 'trojan://', 'vmess://', 'hysteria2://', 'hy2://')):
             all_links.add(src)
             logging.info(f"[{idx}/{len(sources)}] {short_src} → 1 ключ (прямая ссылка)")
             continue
-
         content = fetch_content(src)
         if not content:
-            # Ошибка загрузки – уже есть warning в fetch_content
             logging.info(f"[{idx}/{len(sources)}] {short_src} → 0 ключей (ошибка загрузки)")
             continue
-
         decoded = decode_base64_content(content)
         links = extract_links_from_text(content)
         if decoded != content:
             links.extend(extract_links_from_text(decoded))
-
-        # Добавляем все уникальные ссылки
         for link in links:
             all_links.add(link)
-
         logging.info(f"[{idx}/{len(sources)}] {short_src} → {len(links)} ключей")
-
     logging.info(f"🎯 Всего уникальных ссылок: {len(all_links)}")
     return list(all_links)
 
-# ---------- ПАРСЕРЫ ----------
+def flag_to_country_code(flag):
+    """Извлекает двухбуквенный код страны из эмодзи-флага."""
+    if len(flag) < 2:
+        return 'ZZ'
+    code = ''
+    for ch in flag:
+        if 127397 <= ord(ch) <= 127398 + 25:
+            code += chr(ord(ch) - 127397)
+    return code if len(code) == 2 else 'ZZ'
+
+# ---------- ПАРСЕРЫ (сокращено для экономии места, см. полную версию в предыдущих ответах) ----------
+# ... (все функции parse_* остаются без изменений)
+# Вставьте сюда все парсеры из предыдущего полного листинга
+
 def parse_vless_link(link):
     try:
         without_proto = link[8:]
@@ -310,13 +314,11 @@ def parse_trojan_link(link):
         allow_insecure = params.get('allowInsecure', ['0'])[0].lower() in ('1', 'true', 'yes')
         network = params.get('type', ['tcp'])[0]
         security = params.get('security', ['tls'])[0]
-
         path = None
         host_header = None
         if network == 'ws':
             path = params.get('path', ['/'])[0]
             host_header = params.get('host', [host])[0]
-
         return {
             'protocol': 'trojan',
             'host': host,
@@ -381,27 +383,22 @@ def parse_hysteria2_link(link):
             rest = link[6:]
         else:
             return None
-
         userinfo = None
         hostport = rest
         if '@' in rest:
             userinfo, hostport = rest.split('@', 1)
-
         password = None
         if userinfo:
             password = userinfo
-
         parsed = urlparse(f"//{hostport}")
         host = parsed.hostname
         port = parsed.port or 443
         params = parse_qs(parsed.query)
-
         insecure = params.get('insecure', ['0'])[0].lower() in ('1', 'true', 'yes')
         sni = params.get('sni', [host])[0]
         up = params.get('up', [''])[0]
         down = params.get('down', [''])[0]
         obfs = params.get('obfs', [''])[0]
-
         return {
             'protocol': 'hysteria2',
             'host': host,
@@ -449,12 +446,9 @@ def create_singbox_config(config):
         "listen": "127.0.0.1",
         "listen_port": SOCKS_PORT
     }
-
     outbound_tag = "proxy"
     outbound = {}
-
     protocol = config['protocol']
-
     if protocol == 'ss':
         outbound = {
             "type": "shadowsocks",
@@ -464,7 +458,6 @@ def create_singbox_config(config):
             "method": config['method'],
             "password": config['password']
         }
-
     elif protocol == 'trojan':
         outbound = {
             "type": "trojan",
@@ -486,7 +479,6 @@ def create_singbox_config(config):
                     "Host": config.get('host_header', config['host'])
                 }
             }
-
     elif protocol == 'vless':
         outbound = {
             "type": "vless",
@@ -497,7 +489,6 @@ def create_singbox_config(config):
         }
         if config.get('flow'):
             outbound["flow"] = config['flow']
-
         security = config.get('security', 'none')
         if security in ('tls', 'reality'):
             tls_settings = {
@@ -514,7 +505,6 @@ def create_singbox_config(config):
                 if config.get('spx'):
                     tls_settings["reality"]["spider_x"] = config['spx']
             outbound["tls"] = tls_settings
-
         if config.get('type') == 'ws':
             outbound["transport"] = {
                 "type": "ws",
@@ -523,7 +513,6 @@ def create_singbox_config(config):
                     "Host": config.get('host_header', config['host'])
                 }
             }
-
     elif protocol == 'vmess':
         outbound = {
             "type": "vmess",
@@ -547,7 +536,6 @@ def create_singbox_config(config):
                     "Host": config.get('host_header', config['host'])
                 }
             }
-
     elif protocol == 'hysteria2':
         outbound = {
             "type": "hysteria2",
@@ -573,11 +561,9 @@ def create_singbox_config(config):
                 outbound["down_mbps"] = int(config['down'])
             except:
                 pass
-
     else:
         logging.debug(f"Неподдерживаемый протокол: {protocol}")
         return None
-
     sb_config = {
         "log": {"level": "error"},
         "inbounds": [inbound],
@@ -613,15 +599,12 @@ def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
         return (link, False)
-
     sb_config = create_singbox_config(config_dict)
     if not sb_config:
         return (link, False)
-
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         config_path = f.name
         json.dump(sb_config, f, indent=2)
-
     process = None
     try:
         process = subprocess.Popen(
@@ -629,12 +612,10 @@ def check_real(link):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         time.sleep(SING_BOX_STARTUP_DELAY)
-
         proxies = {
             'http': f'socks5h://127.0.0.1:{SOCKS_PORT}',
             'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
         }
-
         needs_https = False
         if config_dict['protocol'] in ('vless', 'vmess', 'trojan', 'hysteria2'):
             if config_dict['protocol'] == 'vmess':
@@ -645,7 +626,6 @@ def check_real(link):
                 security = config_dict.get('security', 'none')
                 if security in ('tls', 'reality'):
                     needs_https = True
-
         http_success = False
         for test_url in TEST_URLS:
             try:
@@ -657,10 +637,8 @@ def check_real(link):
                 break
             except Exception:
                 continue
-
         if not http_success:
             return (link, False)
-
         if needs_https:
             try:
                 https_test = "https://www.google.com/generate_204"
@@ -668,9 +646,7 @@ def check_real(link):
                              headers={'User-Agent': USER_AGENT}, verify=False)
             except Exception:
                 return (link, False)
-
         return (link, True)
-
     except Exception as e:
         logging.debug(f"Ошибка при проверке {link[:60]}: {e}")
         return (link, False)
@@ -689,9 +665,8 @@ def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
     logging.info(f"🚀 Начинаю двухуровневую проверку {total_checks} ссылок")
-
     logging.info(f"🌐 Этап 1: TCP-проверка {total_checks} ссылок...")
-    tcp_success = []  # (link, ip, latency_ms)
+    tcp_success = []
     with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
         future_to_link = {executor.submit(check_tcp, link): link for link in links}
         for future in as_completed(future_to_link):
@@ -699,14 +674,10 @@ def filter_working_links(links):
             link, ok, ip, latency = future.result()
             if ok and ip and latency is not None and latency <= MAX_LATENCY_MS:
                 tcp_success.append((link, ip, latency))
-
     logging.info(f"📊 TCP-проверка завершена. Прошли (latency <= {MAX_LATENCY_MS} мс): {len(tcp_success)}/{total_checks}")
-
     if not tcp_success:
         return []
-
-    # Фильтрация по уникальной паре (IP, порт) – оставляем лучшую latency
-    best_by_endpoint = {}  # ключ (ip, port) -> (link, latency)
+    best_by_endpoint = {}
     for link, ip, latency in tcp_success:
         parsed = parse_link(link)
         if not parsed:
@@ -715,28 +686,22 @@ def filter_working_links(links):
         key = (ip, port)
         if key not in best_by_endpoint or latency < best_by_endpoint[key][1]:
             best_by_endpoint[key] = (link, latency)
-
     unique_tcp = [(link, ip, latency) for (ip, port), (link, latency) in best_by_endpoint.items()]
     logging.info(f"🗂️ Уникальных (IP:порт) после TCP: {len(unique_tcp)} из {len(tcp_success)}")
-
-    # Определяем геоданные
     logging.info(f"🌍 Определение геоданных для {len(unique_tcp)} серверов...")
     geo_by_link = {}
     for link, ip, _ in unique_tcp:
         flag, city = get_geo_info(ip) if ip else ("", "")
         if flag:
             geo_by_link[link] = (flag, city)
-
     logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
     if not geo_by_link:
         return []
-
     logging.info(f"🧪 Этап 2: Реальная проверка {len(geo_by_link)} ссылок...")
     working_links_with_geo = []
     stage_total = len(geo_by_link)
     stage_current = 0
     links_to_check = list(geo_by_link.keys())
-
     with ThreadPoolExecutor(max_workers=REAL_CHECK_CONCURRENCY) as executor:
         future_to_link = {executor.submit(check_real, link): link for link in links_to_check}
         for future in as_completed(future_to_link):
@@ -745,7 +710,6 @@ def filter_working_links(links):
             record_counter += 1
             link, is_working = future.result()
             short = shorten_link(link)
-
             if link.startswith('vless://'):
                 proto = 'vless'
             elif link.startswith('ss://'):
@@ -758,27 +722,43 @@ def filter_working_links(links):
                 proto = 'hy2'
             else:
                 proto = '?'
-
             flag, city = geo_by_link[link]
-
             if is_working:
                 working_links_with_geo.append((link, flag, city))
                 emoji = "✅"
             else:
                 emoji = "❌"
-
             log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short}"
             logging.info(log_msg)
-
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
 
-# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ----------
+# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ С СОРТИРОВКОЙ ----------
 def save_working_links(links_with_geo):
     logging.info(f"💾 Сохраняю {len(links_with_geo)} серверов с геоданными...")
     if not links_with_geo:
         logging.warning("Нет серверов для сохранения.")
         return 0
+
+    # Сортировка: Россия, Европа, остальные
+    europe_codes = [
+        'AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU',
+        'IE','IT','LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK',
+        'GB','CH','NO','IS','LI','AL','BA','RS','ME','MK','UA','BY','MD',
+        'GE','AZ','AM','TR'
+    ]
+    def sort_key(item):
+        link, flag, city = item
+        code = flag_to_country_code(flag)
+        if code == 'RU':
+            priority = 0
+        elif code in europe_codes:
+            priority = 1
+        else:
+            priority = 2
+        return (priority, code, city or '')
+
+    links_with_geo.sort(key=sort_key)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         f.write(f"#profile-title:{PROFILE_TITLE}\n")
@@ -823,34 +803,27 @@ def check_singbox_available():
         logging.error(f"❌ Ошибка проверки sing-box: {e}")
         return False
 
-# ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 def main():
     global record_counter, current_check, total_checks
     logging.info("🟢 Запуск генератора подписок (ядро: sing-box; протоколы: Vless, SS, Trojan, VMess, Hysteria2)")
     if not check_singbox_available():
         logging.error("sing-box обязателен. Завершение.")
         return
-
     sources = read_sources()
     if not sources:
         return
-
     all_links = gather_all_links(sources)
     if not all_links:
         return
-
     record_counter = 0
     current_check = 0
     total_checks = len(all_links)
-
     working_links_with_geo = filter_working_links(all_links)
     written = save_working_links(working_links_with_geo)
-
     if written > 0:
         create_base64_subscription()
     else:
         logging.warning("Нет серверов с флагами – Base64 не создана.")
-
     logging.info(f"📊 Итог: {len(working_links_with_geo)} рабочих с флагами из {len(all_links)} проверенных")
     logging.info("🏁 Работа завершена")
 
