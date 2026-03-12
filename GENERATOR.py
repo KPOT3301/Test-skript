@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-# GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
-# Ядро: sing‑box
-# Логи: INFO – основные этапы, прогресс TLS (многопоточно), результаты реальной проверки.
-# После TCP‑уникализации TLS-проверка в 100 потоков, затем реальная проверка через sing‑box (тест YouTube/Google).
-# Подписка сортируется: сначала Россия, потом все остальные (включая неизвестные); внутри по хосту.
-# Обновление GeoIP базы раз в 7 дней.
+# GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 + флаги стран и города
+# Ядро: sing‑box, многопоточная проверка TLS
 
 import os
 import re
 import socket
-import ssl
 import base64
 import logging
 import subprocess
@@ -24,9 +19,9 @@ from functools import lru_cache
 from datetime import datetime
 from urllib3.exceptions import InsecureRequestWarning
 
-sys.stdout.reconfigure(line_buffering=True)
 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
+# ---------- НАСТРОЙКА ЛОГИРОВАНИЯ ----------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -35,10 +30,12 @@ logging.basicConfig(
     force=True
 )
 
+# ---------- СЧЁТЧИКИ ДЛЯ ЛОГОВ ----------
 record_counter = 0
 current_check = 0
 total_checks = 0
 
+# ---------- ЧАСОВОЙ ПОЯС ----------
 try:
     from zoneinfo import ZoneInfo
     TIMEZONE = "Asia/Yekaterinburg"
@@ -51,6 +48,7 @@ TODAY_STR = LOCAL_NOW.strftime("%d-%m-%Y")
 
 import requests
 
+# ---------- GEOIP (CITY) ----------
 try:
     import geoip2.database
     GEOIP_AVAILABLE = True
@@ -58,12 +56,14 @@ except ImportError:
     GEOIP_AVAILABLE = False
     logging.warning("⚠️ geoip2 не установлена. Флаги стран и города не будут добавлены.")
 
+# ---------- КОНСТАНТЫ ПОДПИСКИ ----------
 PROFILE_TITLE = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 SUPPORT_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 PROFILE_UPDATE_INTERVAL = "1"
 SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
 
+# ---------- ОСНОВНЫЕ КОНСТАНТЫ ----------
 SOURCES_FILE = "sources.txt"
 OUTPUT_FILE = "subscription.txt"
 OUTPUT_BASE64_FILE = "subscription_base64.txt"
@@ -71,70 +71,42 @@ REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 SING_BOX_PATH = "sing-box"
 
+# TCP-проверка
 TCP_CHECK_TIMEOUT = 10
 TCP_MAX_WORKERS = 400
-TLS_CHECK_TIMEOUT = 5
-TLS_MAX_WORKERS = 100
+
+# Реальная проверка
+SOCKS_PORT = 8080
 REAL_CHECK_TIMEOUT = 15
 REAL_CHECK_CONCURRENCY = 30
 SING_BOX_STARTUP_DELAY = 1
-SOCKS_PORT = 8080
 
-# Расширенный список тестовых URL (YouTube, Google, connectivity check)
 TEST_URLS = [
-    "https://www.youtube.com/generate_204",
-    "https://www.youtube.com/favicon.ico",
-    "https://www.google.com/generate_204",
     "http://connectivitycheck.gstatic.com/generate_204"
 ]
 
-MAX_LATENCY_MS = 300
+MAX_LATENCY_MS = 300  # максимально допустимая задержка TCP-соединения (мс)
 
+# ---------- GEOIP ЗАГРУЗКА (CITY) ----------
 GEOIP_DB_PATH = "GeoLite2-City.mmdb"
 GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
-GEOIP_MAX_AGE_DAYS = 7  # Обновлять раз в 7 дней
 
 def ensure_geoip_db():
-    """Проверяет наличие и актуальность базы GeoIP, при необходимости скачивает."""
     if not GEOIP_AVAILABLE:
         return False
-
-    # Если файл существует и старше заданного количества дней – удаляем
     if os.path.exists(GEOIP_DB_PATH):
-        file_time = os.path.getmtime(GEOIP_DB_PATH)
-        age_days = (time.time() - file_time) / (24 * 3600)
-        if age_days > GEOIP_MAX_AGE_DAYS:
-            os.remove(GEOIP_DB_PATH)
-            logging.info(f"🗑️ База GeoIP устарела (старше {GEOIP_MAX_AGE_DAYS} дней), удаляем для обновления.")
-
-    # Если файла нет – скачиваем
-    if not os.path.exists(GEOIP_DB_PATH):
-        logging.info("🌍 Скачиваю базу GeoIP (City)...")
-        try:
-            r = requests.get(GEOIP_DB_URL, timeout=30)
-            r.raise_for_status()
-            with open(GEOIP_DB_PATH, 'wb') as f:
-                f.write(r.content)
-            logging.info("✅ База GeoIP (City) скачана")
-        except Exception as e:
-            logging.error(f"❌ Ошибка скачивания GeoIP: {e}")
-            return False
-
-    # Проверяем целостность базы (тестовый запрос)
+        return True
+    logging.info("🌍 Скачиваю базу GeoIP (City)...")
     try:
-        test_reader = geoip2.database.Reader(GEOIP_DB_PATH)
-        test_reader.city("8.8.8.8")  # пробуем определить Google DNS
-        test_reader.close()
-        logging.info("✅ GeoIP база загружена и работает")
+        r = requests.get(GEOIP_DB_URL, timeout=30)
+        r.raise_for_status()
+        with open(GEOIP_DB_PATH, 'wb') as f:
+            f.write(r.content)
+        logging.info("✅ База GeoIP (City) скачана")
         return True
     except Exception as e:
-        logging.error(f"❌ База GeoIP повреждена или не читается: {e}. Попытка перезагрузить...")
-        try:
-            os.remove(GEOIP_DB_PATH)
-        except:
-            pass
-        # Повторная попытка скачивания
-        return ensure_geoip_db()  # рекурсивный вызов для повторной попытки
+        logging.error(f"❌ Ошибка скачивания GeoIP: {e}")
+        return False
 
 reader = None
 if ensure_geoip_db():
@@ -144,7 +116,7 @@ if ensure_geoip_db():
         logging.error(f"❌ Не удалось открыть базу GeoIP: {e}")
 
 def get_geo_info(ip):
-    """Возвращает (флаг, город) для IP или ("", "") при ошибке."""
+    """Возвращает (флаг, город) для указанного IP"""
     if reader is None:
         return "", ""
     try:
@@ -156,6 +128,7 @@ def get_geo_info(ip):
     except Exception:
         return "", ""
 
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
 @lru_cache(maxsize=256)
 def resolve_host(host):
     return socket.gethostbyname(host)
@@ -219,7 +192,7 @@ def gather_all_links(sources):
     return list(all_links)
 
 def flag_to_country_code(flag):
-    """Преобразует флаг-эмодзи в двухбуквенный код страны. Если флаг некорректен, возвращает 'ZZ'."""
+    """Извлекает двухбуквенный код страны из эмодзи-флага."""
     if len(flag) < 2:
         return 'ZZ'
     code = ''
@@ -595,128 +568,6 @@ def create_singbox_config(config):
     }
     return sb_config
 
-# ---------- TLS HANDSHAKE ----------
-def check_tls_handshake(ip, port, sni):
-    try:
-        context = ssl.create_default_context()
-        with socket.create_connection((ip, port), timeout=TLS_CHECK_TIMEOUT) as sock:
-            with context.wrap_socket(sock, server_hostname=sni) as ssock:
-                ssock.do_handshake()
-        return True
-    except Exception:
-        return False
-
-def check_tls_item(link, ip, latency):
-    """Выполняет TLS-проверку для одной ссылки, возвращает (ok, short_link)."""
-    parsed = parse_link(link)
-    if not parsed:
-        return False, shorten_link(link)
-    needs_tls = False
-    if parsed['protocol'] == 'trojan':
-        needs_tls = True
-    elif parsed['protocol'] == 'vless':
-        needs_tls = parsed.get('security') in ('tls', 'reality')
-    elif parsed['protocol'] == 'vmess':
-        needs_tls = parsed.get('tls', False)
-    elif parsed['protocol'] == 'hysteria2':
-        needs_tls = True
-    if needs_tls:
-        sni = parsed.get('sni', parsed['host'])
-        ok = check_tls_handshake(ip, parsed['port'], sni)
-        return ok, shorten_link(link)
-    else:
-        return True, shorten_link(link)
-
-# ---------- РЕАЛЬНАЯ ПРОВЕРКА (через sing‑box) ----------
-def check_real(link):
-    """Проверяет, работает ли прокси, выполняя HTTP-запрос через sing‑box."""
-    config_dict = parse_link(link)
-    if not config_dict:
-        return False
-
-    sb_config = create_singbox_config(config_dict)
-    if not sb_config:
-        return False
-
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-        config_path = f.name
-        json.dump(sb_config, f, indent=2)
-
-    process = None
-    try:
-        process = subprocess.Popen(
-            [SING_BOX_PATH, 'run', '-c', config_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        time.sleep(SING_BOX_STARTUP_DELAY)
-
-        proxies = {
-            'http': f'socks5h://127.0.0.1:{SOCKS_PORT}',
-            'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
-        }
-
-        # Проверяем, нужно ли дополнительно тестировать HTTPS (уже покрыто URL)
-        needs_https = False
-        if config_dict['protocol'] in ('vless', 'vmess', 'trojan', 'hysteria2'):
-            if config_dict['protocol'] == 'vmess':
-                needs_https = config_dict.get('tls', False)
-            elif config_dict['protocol'] == 'hysteria2':
-                needs_https = True
-            else:
-                security = config_dict.get('security', 'none')
-                if security in ('tls', 'reality'):
-                    needs_https = True
-
-        # Пытаемся получить успешный ответ хотя бы от одного тестового URL
-        http_ok = False
-        for test_url in TEST_URLS:
-            try:
-                # Используем verify=False для HTTPS, так как у нас могут быть самоподписанные сертификаты
-                resp = requests.get(
-                    test_url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                    headers={'User-Agent': USER_AGENT}, verify=False
-                )
-                # Принимаем любой 2xx статус (200, 204 и т.д.)
-                if resp.status_code // 100 == 2:
-                    http_ok = True
-                    logging.debug(f"Реальная проверка: успех через {test_url}")
-                    break
-            except Exception as e:
-                logging.debug(f"Реальная проверка: {test_url} не сработал ({e})")
-                continue
-
-        if not http_ok:
-            return False
-
-        # Если протокол требует HTTPS, убедимся, что он тоже работает (обычно один из URL уже HTTPS)
-        if needs_https:
-            # Достаточно того, что предыдущий запрос был HTTPS, но на всякий случай пробуем ещё один HTTPS URL
-            https_url = "https://www.google.com/generate_204"
-            try:
-                resp = requests.get(
-                    https_url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                    headers={'User-Agent': USER_AGENT}, verify=False
-                )
-                if resp.status_code // 100 != 2:
-                    return False
-            except Exception:
-                return False
-
-        return True
-
-    except Exception as e:
-        logging.debug(f"Ошибка при реальной проверке {link[:60]}: {e}")
-        return False
-    finally:
-        if process:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        if os.path.exists(config_path):
-            os.unlink(config_path)
-
 # ---------- TCP ПРОВЕРКА ----------
 def check_tcp(link):
     parsed = parse_link(link)
@@ -735,6 +586,79 @@ def check_tcp(link):
     except:
         return (link, False, None, None)
 
+# ---------- РЕАЛЬНАЯ ПРОВЕРКА С TLS ----------
+def check_real(link):
+    config_dict = parse_link(link)
+    if not config_dict:
+        return (link, False, False, None)  # is_working=False, tls_required=False, tls_success=None
+    sb_config = create_singbox_config(config_dict)
+    if not sb_config:
+        return (link, False, False, None)
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        config_path = f.name
+        json.dump(sb_config, f, indent=2)
+    process = None
+    try:
+        process = subprocess.Popen(
+            [SING_BOX_PATH, 'run', '-c', config_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        time.sleep(SING_BOX_STARTUP_DELAY)
+        proxies = {
+            'http': f'socks5h://127.0.0.1:{SOCKS_PORT}',
+            'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
+        }
+        # Определяем, требуется ли TLS
+        tls_required = False
+        if config_dict['protocol'] in ('vless', 'vmess', 'trojan', 'hysteria2'):
+            if config_dict['protocol'] == 'vmess':
+                tls_required = config_dict.get('tls', False)
+            elif config_dict['protocol'] == 'hysteria2':
+                tls_required = True
+            else:
+                security = config_dict.get('security', 'none')
+                if security in ('tls', 'reality'):
+                    tls_required = True
+
+        http_success = False
+        for test_url in TEST_URLS:
+            try:
+                resp = requests.get(
+                    test_url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
+                    headers={'User-Agent': USER_AGENT}, allow_redirects=False
+                )
+                http_success = True
+                break
+            except Exception:
+                continue
+        if not http_success:
+            return (link, False, tls_required, None)
+
+        tls_success = None
+        if tls_required:
+            try:
+                https_test = "https://www.google.com/generate_204"
+                requests.get(https_test, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
+                             headers={'User-Agent': USER_AGENT}, verify=False)
+                tls_success = True
+            except Exception:
+                tls_success = False
+                return (link, False, tls_required, tls_success)
+
+        return (link, True, tls_required, tls_success)
+    except Exception as e:
+        logging.debug(f"Ошибка при проверке {link[:60]}: {e}")
+        return (link, False, False, None)
+    finally:
+        if process:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        if os.path.exists(config_path):
+            os.unlink(config_path)
+
 # ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ ----------
 def filter_working_links(links):
     global record_counter, current_check, total_checks
@@ -752,8 +676,6 @@ def filter_working_links(links):
     logging.info(f"📊 TCP-проверка завершена. Прошли (latency <= {MAX_LATENCY_MS} мс): {len(tcp_success)}/{total_checks}")
     if not tcp_success:
         return []
-
-    # Фильтрация по уникальной паре (IP, порт) – оставляем лучшую latency
     best_by_endpoint = {}
     for link, ip, latency in tcp_success:
         parsed = parse_link(link)
@@ -765,53 +687,16 @@ def filter_working_links(links):
             best_by_endpoint[key] = (link, latency)
     unique_tcp = [(link, ip, latency) for (ip, port), (link, latency) in best_by_endpoint.items()]
     logging.info(f"🗂️ Уникальных (IP:порт) после TCP: {len(unique_tcp)} из {len(tcp_success)}")
-
-    # Многопоточная TLS-проверка
-    logging.info(f"🔒 Начинаю TLS-проверку для {len(unique_tcp)} серверов в {TLS_MAX_WORKERS} потоков...")
-    tls_passed = []
-    tls_total = len(unique_tcp)
-    with ThreadPoolExecutor(max_workers=TLS_MAX_WORKERS) as executor:
-        future_to_item = {}
-        for link, ip, latency in unique_tcp:
-            future = executor.submit(check_tls_item, link, ip, latency)
-            future_to_item[future] = (link, ip, latency)
-
-        completed = 0
-        for future in as_completed(future_to_item):
-            completed += 1
-            link, ip, latency = future_to_item[future]
-            ok, short = future.result()
-            if ok:
-                tls_passed.append((link, ip, latency))
-                status = "✅"
-            else:
-                status = "❌"
-            logging.info(f"{status} TLS handshake [{completed}/{tls_total}]: {short}")
-            if completed % 100 == 0:
-                logging.info(f"⏳ TLS-проверка: {completed}/{tls_total} выполнено")
-
-    logging.info(f"🔒 TLS-проверка завершена. Прошли: {len(tls_passed)}/{tls_total}")
-    if not tls_passed:
-        return []
-
-    # Определяем геоданные для всех прошедших TLS (даже если не удалось определить – ставим флаг по умолчанию)
-    logging.info(f"🌍 Определение геоданных для {len(tls_passed)} серверов...")
+    logging.info(f"🌍 Определение геоданных для {len(unique_tcp)} серверов...")
     geo_by_link = {}
-    for link, ip, _ in tls_passed:
+    for link, ip, _ in unique_tcp:
         flag, city = get_geo_info(ip) if ip else ("", "")
-        if not flag:
-            # Если геоданные не получены, используем флаг "🏴" и пустой город
-            flag = "🏴"
-            city = ""
-            logging.debug(f"⚠️ Не удалось определить геоданные для {ip}, использую флаг {flag}")
-        else:
-            logging.debug(f"🌍 {ip} → {flag} {city}")
-        geo_by_link[link] = (flag, city)
-
-    logging.info(f"🧾 Серверов с определёнными флагами: {sum(1 for v in geo_by_link.values() if v[0] != '🏴')} из {len(geo_by_link)}")
-
-    # Реальная проверка через sing‑box (для всех ссылок, для которых есть гео)
-    logging.info(f"🧪 Этап 2: Реальная проверка через sing‑box для {len(geo_by_link)} ссылок...")
+        if flag:
+            geo_by_link[link] = (flag, city)
+    logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
+    if not geo_by_link:
+        return []
+    logging.info(f"🧪 Этап 2: Реальная проверка {len(geo_by_link)} ссылок...")
     working_links_with_geo = []
     stage_total = len(geo_by_link)
     stage_current = 0
@@ -822,8 +707,7 @@ def filter_working_links(links):
             stage_current += 1
             current_check += 1
             record_counter += 1
-            link = future_to_link[future]
-            is_working = future.result()
+            link, is_working, tls_req, tls_ok = future.result()
             short = shorten_link(link)
             if link.startswith('vless://'):
                 proto = 'vless'
@@ -838,33 +722,33 @@ def filter_working_links(links):
             else:
                 proto = '?'
             flag, city = geo_by_link[link]
+            # Формируем статус TLS
+            tls_status = ""
+            if tls_req:
+                tls_status = "🔒" if tls_ok else "🔓"
+            else:
+                tls_status = "-"
+            emoji = "✅" if is_working else "❌"
+            log_msg = f"{proto} {emoji} {tls_status} [{stage_current}/{stage_total}]: {short}"
+            logging.info(log_msg)
             if is_working:
                 working_links_with_geo.append((link, flag, city))
-                emoji = "✅"
-            else:
-                emoji = "❌"
-            log_msg = f"{proto} {emoji} [{stage_current}/{stage_total}]: {short}"
-            logging.info(log_msg)
-    logging.info(f"📊 Реальная проверка завершена. Рабочих: {len(working_links_with_geo)}/{stage_total}")
+    logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
 
-# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ----------
+# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ С СОРТИРОВКОЙ (РОССИЯ -> ОСТАЛЬНЫЕ) ----------
 def save_working_links(links_with_geo):
     logging.info(f"💾 Сохраняю {len(links_with_geo)} серверов с геоданными...")
     if not links_with_geo:
         logging.warning("Нет серверов для сохранения.")
         return 0
 
-    # Функция сортировки: сначала Россия (code == 'RU'), потом все остальные.
-    # Внутри каждой группы сортируем по коду страны, городу и хосту для стабильности.
+    # Сортировка: Россия (код RU), затем все остальные
     def sort_key(item):
         link, flag, city = item
         code = flag_to_country_code(flag)
-        # Приоритет: 0 для RU, 1 для всех остальных
         priority = 0 if code == 'RU' else 1
-        parsed = parse_link(link)
-        host = parsed['host'] if parsed else link
-        return (priority, code, city or '', host)
+        return (priority, code, city or '')
 
     links_with_geo.sort(key=sort_key)
 
@@ -932,7 +816,7 @@ def main():
         create_base64_subscription()
     else:
         logging.warning("Нет серверов с флагами – Base64 не создана.")
-    logging.info(f"📊 Итог: {written} рабочих из {len(all_links)} проверенных")
+    logging.info(f"📊 Итог: {len(working_links_with_geo)} рабочих с флагами из {len(all_links)} проверенных")
     logging.info("🏁 Работа завершена")
 
 if __name__ == "__main__":
