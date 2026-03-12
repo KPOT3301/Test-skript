@@ -12,5 +12,3 @@ https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_B
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_part1.txt
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_part2.txt
 
-# openray
-https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/1.txt
