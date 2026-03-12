@@ -15,15 +15,24 @@ https://raw.githubusercontent.com/cinev505/VlessTrogan-vpn-key/refs/heads/main/A
 #KFWL
 https://gist.githubusercontent.com/sevushyamamoto-stack/9341be7a058e132154d407d082a60fb1/raw/mysub.txt
 
-# kort0881
+# kort0881 ДОСТУП К ИНТЕРНЕТУ
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_part1.txt
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_part2.txt
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_part3.txt
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_all_part1.txt
 https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/My_Euro/my_euro_all_part2.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_part1.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_part2.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_part3.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_part4.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_part1.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_part2.txt
 
 # openray
 https://github.com/nikita29a/FreeProxyList/raw/refs/heads/main/mirror/1.txt
 
 # LimeVPNPaser
 https://raw.githubusercontent.com/LimeHi/LimeVPNGenerator/main/Keys.txt?v=1
+
+# против блокировок
+https://raw.githubusercontent.com/cinev505/VlessTrogan-vpn-key/refs/heads/main/All-keys
