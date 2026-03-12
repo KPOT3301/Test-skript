@@ -1,4 +1,3 @@
 requests
-pysocks
 geoip2
-tzdata
+urllib3
