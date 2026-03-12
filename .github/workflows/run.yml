@@ -24,20 +24,32 @@ jobs:
           pip install -r requirements.txt
           pip install geoip2
 
-      - name: Get latest sing-box version
+      - name: Get latest sing-box URL
         id: get_version
         run: |
-          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.assets[] | select(.name | contains("linux-amd64")) | .browser_download_url')
+          # Пытаемся взять обычную сборку (без musl)
+          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | \
+            jq -r '.assets[] | select(.name | contains("linux-amd64") and (contains("musl") | not)) | .browser_download_url' | \
+            head -n1)
+          # Если не нашли — берём любую linux-amd64
+          if [ -z "$LATEST_URL" ]; then
+            LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | \
+              jq -r '.assets[] | select(.name | contains("linux-amd64")) | .browser_download_url' | \
+              head -n1)
+          fi
           echo "LATEST_URL=$LATEST_URL" >> $GITHUB_ENV
 
       - name: Download and install sing-box
         run: |
-          wget -q ${{ env.LATEST_URL }} -O sing-box.tar.gz
+          wget -q "${{ env.LATEST_URL }}" -O sing-box.tar.gz
           tar -xzf sing-box.tar.gz
-          find . -type f -name "sing-box" -exec mv {} sing-box \;
-          chmod +x sing-box
-          sudo mv sing-box /usr/local/bin/
-          rm -rf sing-box.tar.gz
+          # Ищем исполняемый файл sing-box внутри распакованного архива
+          find . -type f -name "sing-box" -exec mv {} ./sing-box-bin \;
+          sudo mv ./sing-box-bin /usr/local/bin/sing-box
+          sudo chmod +x /usr/local/bin/sing-box
+          # Очистка
+          rm -f sing-box.tar.gz
+          rm -rf $(find . -maxdepth 1 -type d -name "sing-box-*" 2>/dev/null)
 
       - name: Run GENERATOR.py
         run: python GENERATOR.py
