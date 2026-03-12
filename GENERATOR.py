@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Ядро: sing‑box
-# Логи: INFO – только основные этапы и статистика по источникам, DEBUG – детали загрузки.
-# Добавлен вывод количества ключей из каждого источника в процессе сбора.
-# После TCP‑проверки оставляем только уникальные пары (IP, порт) с наименьшей задержкой.
-# Подавлены предупреждения InsecureRequestWarning.
-# Подписка сортируется: Россия, Европа, остальные; внутри групп по TTFB (лучшие сверху).
-# Добавлена проверка TLS handshake и замер TTFB (Time To First Byte) с порогом отсева.
+# Логи: INFO – основные этапы, прогресс TLS, результаты проверок.
+# После TCP‑уникализации TLS-проверка с детальным выводом (✅/❌, прогресс).
+# Подписка сортируется: Россия, Европа, остальные; внутри по TTFB.
+# Добавлена проверка TLS handshake и замер TTFB с порогом отсева.
 
 import os
 import re
@@ -26,12 +24,9 @@ from functools import lru_cache
 from datetime import datetime
 from urllib3.exceptions import InsecureRequestWarning
 
-# Принудительная буферизация строк для реального времени в логах GitHub Actions
 sys.stdout.reconfigure(line_buffering=True)
-
 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
-# ---------- НАСТРОЙКА ЛОГИРОВАНИЯ ----------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -40,12 +35,10 @@ logging.basicConfig(
     force=True
 )
 
-# ---------- СЧЁТЧИКИ ДЛЯ ЛОГОВ ----------
 record_counter = 0
 current_check = 0
 total_checks = 0
 
-# ---------- ЧАСОВОЙ ПОЯС ----------
 try:
     from zoneinfo import ZoneInfo
     TIMEZONE = "Asia/Yekaterinburg"
@@ -58,7 +51,6 @@ TODAY_STR = LOCAL_NOW.strftime("%d-%m-%Y")
 
 import requests
 
-# ---------- GEOIP (CITY) ----------
 try:
     import geoip2.database
     GEOIP_AVAILABLE = True
@@ -66,14 +58,12 @@ except ImportError:
     GEOIP_AVAILABLE = False
     logging.warning("⚠️ geoip2 не установлена. Флаги стран и города не будут добавлены.")
 
-# ---------- КОНСТАНТЫ ПОДПИСКИ ----------
 PROFILE_TITLE = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 SUPPORT_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
 PROFILE_UPDATE_INTERVAL = "1"
 SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
 
-# ---------- ОСНОВНЫЕ КОНСТАНТЫ ----------
 SOURCES_FILE = "sources.txt"
 OUTPUT_FILE = "subscription.txt"
 OUTPUT_BASE64_FILE = "subscription_base64.txt"
@@ -81,29 +71,17 @@ REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 SING_BOX_PATH = "sing-box"
 
-# TCP-проверка
 TCP_CHECK_TIMEOUT = 10
 TCP_MAX_WORKERS = 400
-
-# TLS-проверка
 TLS_CHECK_TIMEOUT = 5
-
-# TTFB
-MAX_TTFB_MS = 1000  # максимально допустимый TTFB (мс)
-
-# Реальная проверка
+MAX_TTFB_MS = 1000
 SOCKS_PORT = 8080
 REAL_CHECK_TIMEOUT = 15
 REAL_CHECK_CONCURRENCY = 30
 SING_BOX_STARTUP_DELAY = 1
+TEST_URLS = ["http://connectivitycheck.gstatic.com/generate_204"]
+MAX_LATENCY_MS = 300
 
-TEST_URLS = [
-    "http://connectivitycheck.gstatic.com/generate_204"
-]
-
-MAX_LATENCY_MS = 300  # максимально допустимая задержка TCP-соединения (мс)
-
-# ---------- GEOIP ЗАГРУЗКА (CITY) ----------
 GEOIP_DB_PATH = "GeoLite2-City.mmdb"
 GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
 
@@ -132,7 +110,6 @@ if ensure_geoip_db():
         logging.error(f"❌ Не удалось открыть базу GeoIP: {e}")
 
 def get_geo_info(ip):
-    """Возвращает (флаг, город) для указанного IP"""
     if reader is None:
         return "", ""
     try:
@@ -144,7 +121,6 @@ def get_geo_info(ip):
     except Exception:
         return "", ""
 
-# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
 @lru_cache(maxsize=256)
 def resolve_host(host):
     return socket.gethostbyname(host)
@@ -208,7 +184,6 @@ def gather_all_links(sources):
     return list(all_links)
 
 def flag_to_country_code(flag):
-    """Извлекает двухбуквенный код страны из эмодзи-флага."""
     if len(flag) < 2:
         return 'ZZ'
     code = ''
@@ -448,7 +423,6 @@ def shorten_link(link):
 
 # ---------- TLS HANDSHAKE ----------
 def check_tls_handshake(ip, port, sni):
-    """Проверяет успешность TLS handshake."""
     try:
         context = ssl.create_default_context()
         with socket.create_connection((ip, port), timeout=TLS_CHECK_TIMEOUT) as sock:
@@ -458,16 +432,13 @@ def check_tls_handshake(ip, port, sni):
     except Exception:
         return False
 
-# ---------- TTFB ----------
 def measure_ttfb(proxies, url):
-    """Измеряет Time To First Byte (мс)."""
     try:
         start = time.time()
         resp = requests.get(
             url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
             headers={'User-Agent': USER_AGENT}, stream=True
         )
-        # читаем первый байт
         next(resp.iter_content(1))
         ttfb = int((time.time() - start) * 1000)
         resp.close()
@@ -636,15 +607,12 @@ def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
         return (link, False, None)
-
     sb_config = create_singbox_config(config_dict)
     if not sb_config:
         return (link, False, None)
-
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         config_path = f.name
         json.dump(sb_config, f, indent=2)
-
     process = None
     try:
         process = subprocess.Popen(
@@ -652,12 +620,10 @@ def check_real(link):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         time.sleep(SING_BOX_STARTUP_DELAY)
-
         proxies = {
             'http': f'socks5h://127.0.0.1:{SOCKS_PORT}',
             'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
         }
-
         needs_https = False
         if config_dict['protocol'] in ('vless', 'vmess', 'trojan', 'hysteria2'):
             if config_dict['protocol'] == 'vmess':
@@ -668,18 +634,13 @@ def check_real(link):
                 security = config_dict.get('security', 'none')
                 if security in ('tls', 'reality'):
                     needs_https = True
-
-        # Измеряем TTFB на одном из тестовых URL
         ttfb = None
         for test_url in TEST_URLS:
             ttfb = measure_ttfb(proxies, test_url)
             if ttfb is not None:
                 break
-
         if ttfb is None or ttfb > MAX_TTFB_MS:
             return (link, False, ttfb)
-
-        # Дополнительная проверка HTTPS если нужна
         if needs_https:
             try:
                 https_test = "https://www.google.com/generate_204"
@@ -691,9 +652,7 @@ def check_real(link):
                 resp.close()
             except Exception:
                 return (link, False, ttfb)
-
         return (link, True, ttfb)
-
     except Exception as e:
         logging.debug(f"Ошибка при проверке {link[:60]}: {e}")
         return (link, False, None)
@@ -725,7 +684,6 @@ def filter_working_links(links):
     if not tcp_success:
         return []
 
-    # Фильтрация по уникальной паре (IP, порт) – оставляем лучшую latency
     best_by_endpoint = {}
     for link, ip, latency in tcp_success:
         parsed = parse_link(link)
@@ -738,10 +696,11 @@ def filter_working_links(links):
     unique_tcp = [(link, ip, latency) for (ip, port), (link, latency) in best_by_endpoint.items()]
     logging.info(f"🗂️ Уникальных (IP:порт) после TCP: {len(unique_tcp)} из {len(tcp_success)}")
 
-    # Проверка TLS для протоколов, которые его используют
+    # Детальная TLS-проверка с выводом прогресса
     logging.info(f"🔒 Начинаю TLS-проверку для {len(unique_tcp)} серверов...")
     tls_passed = []
-    for link, ip, latency in unique_tcp:
+    tls_total = len(unique_tcp)
+    for idx, (link, ip, latency) in enumerate(unique_tcp, 1):
         parsed = parse_link(link)
         if not parsed:
             continue
@@ -754,20 +713,27 @@ def filter_working_links(links):
             needs_tls = parsed.get('tls', False)
         elif parsed['protocol'] == 'hysteria2':
             needs_tls = True
+
         if needs_tls:
             sni = parsed.get('sni', parsed['host'])
             if check_tls_handshake(ip, parsed['port'], sni):
                 tls_passed.append((link, ip, latency))
+                status = "✅"
             else:
-                logging.debug(f"TLS handshake failed for {link[:60]}")
+                status = "❌"
+            logging.info(f"{status} TLS handshake [{idx}/{tls_total}]: {shorten_link(link)}")
         else:
             tls_passed.append((link, ip, latency))
-    logging.info(f"🔒 TLS-проверка прошли: {len(tls_passed)} из {len(unique_tcp)}")
+            # можно не логировать серверы без TLS, чтобы не засорять лог
+
+        if idx % 100 == 0:
+            logging.info(f"⏳ TLS-проверка: {idx}/{tls_total} выполнено")
+
+    logging.info(f"🔒 TLS-проверка завершена. Прошли: {len(tls_passed)}/{tls_total}")
     unique_tcp = tls_passed
     if not unique_tcp:
         return []
 
-    # Определяем геоданные
     logging.info(f"🌍 Определение геоданных для {len(unique_tcp)} серверов...")
     geo_by_link = {}
     for link, ip, _ in unique_tcp:
@@ -779,7 +745,7 @@ def filter_working_links(links):
         return []
 
     logging.info(f"🧪 Этап 2: Реальная проверка (TTFB ≤ {MAX_TTFB_MS} мс) {len(geo_by_link)} ссылок...")
-    working_links_with_geo = []  # будем хранить (link, flag, city, ttfb)
+    working_links_with_geo = []
     stage_total = len(geo_by_link)
     stage_current = 0
     links_to_check = list(geo_by_link.keys())
@@ -814,7 +780,7 @@ def filter_working_links(links):
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
 
-# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ С СОРТИРОВКОЙ ПО TTFB ----------
+# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ----------
 def save_working_links(links_with_geo_ttfb):
     logging.info(f"💾 Сохраняю {len(links_with_geo_ttfb)} серверов с геоданными...")
     if not links_with_geo_ttfb:
@@ -837,7 +803,6 @@ def save_working_links(links_with_geo_ttfb):
             priority = 1
         else:
             priority = 2
-        # внутри каждой группы сортируем по TTFB (меньше -> лучше)
         return (priority, ttfb, code, city or '')
 
     links_with_geo_ttfb.sort(key=sort_key)
