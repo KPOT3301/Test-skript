@@ -18,6 +18,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'               # автоматическое кэширование зависимостей
 
       - name: Install dependencies
         run: |
@@ -43,10 +44,16 @@ jobs:
         run: |
           wget -q "${{ env.LATEST_URL }}" -O sing-box.tar.gz
           tar -xzf sing-box.tar.gz
-          # Ищем исполняемый файл sing-box внутри распакованного архива
-          find . -type f -name "sing-box" -exec mv {} ./sing-box-bin \;
-          sudo mv ./sing-box-bin /usr/local/bin/sing-box
+          # Находим единственный бинарник и перемещаем его
+          BIN_PATH=$(find . -type f -name "sing-box" -print -quit)
+          if [ -z "$BIN_PATH" ]; then
+            echo "❌ Бинарник sing-box не найден"
+            exit 1
+          fi
+          sudo mv "$BIN_PATH" /usr/local/bin/sing-box
           sudo chmod +x /usr/local/bin/sing-box
+          # Проверка установки
+          /usr/local/bin/sing-box version
           # Очистка
           rm -f sing-box.tar.gz
           rm -rf $(find . -maxdepth 1 -type d -name "sing-box-*" 2>/dev/null)
