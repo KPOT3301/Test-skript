@@ -27,20 +27,51 @@ jobs:
         run: |
           set -e
           sudo apt-get update && sudo apt-get install -y jq
+          
+          # Получаем последнюю версию sing-box
           LATEST_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
           if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" = "null" ]; then
             echo "Failed to get latest version"
             exit 1
           fi
           echo "Latest version: $LATEST_VERSION"
-          FILE_NAME="sing-box-${LATEST_VERSION}-linux-amd64.tar.gz"
-          DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_VERSION}/${FILE_NAME}"
-          echo "Downloading from $DOWNLOAD_URL"
-          wget -q "$DOWNLOAD_URL" -O sing-box.tar.gz
+          
+          # Пробуем скачать с 'v' в имени файла и без 'v'
+          VERSION_NO_V=${LATEST_VERSION#v}
+          FILE_NAMES=("sing-box-${LATEST_VERSION}-linux-amd64.tar.gz" "sing-box-${VERSION_NO_V}-linux-amd64.tar.gz")
+          SUCCESS=false
+          for FNAME in "${FILE_NAMES[@]}"; do
+            DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_VERSION}/${FNAME}"
+            echo "Trying $DOWNLOAD_URL"
+            if curl --head -s -f -o /dev/null "$DOWNLOAD_URL"; then
+              echo "Downloading $DOWNLOAD_URL"
+              curl -L -f -o sing-box.tar.gz "$DOWNLOAD_URL"
+              SUCCESS=true
+              break
+            fi
+          done
+          
+          if [ "$SUCCESS" != "true" ]; then
+            echo "Could not download sing-box"
+            exit 1
+          fi
+          
+          # Распаковываем
           tar -xzf sing-box.tar.gz
-          find . -maxdepth 2 -name "sing-box" -type f -exec cp {} ./sing-box \;
+          
+          # Ищем бинарник
+          BIN_PATH=$(find . -path "*/sing-box" -type f | head -n1)
+          if [ -z "$BIN_PATH" ]; then
+            echo "Binary not found after extraction"
+            exit 1
+          fi
+          
+          # Копируем в текущую директорию
+          cp "$BIN_PATH" ./sing-box
           chmod +x ./sing-box
           ./sing-box version
+          
+          # Добавляем в PATH
           echo "$(pwd)" >> $GITHUB_PATH
 
       - name: Create sources.txt if not exists
@@ -53,7 +84,7 @@ jobs:
       - name: Run GENERATOR.py
         run: python GENERATOR.py
         env:
-          LOG_LEVEL: INFO
+          LOG_LEVEL: INFO   # можно изменить на DEBUG для отладки
 
       - name: Commit and push if changed
         run: |
