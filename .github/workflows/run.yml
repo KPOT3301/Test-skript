@@ -1,14 +1,13 @@
-# run.yml
+# .github/workflows/run.yml
 name: Check Vless Servers
 
 on:
-  schedule:
-    - cron: '0 19 * * *'   # 19:00 UTC = 00:00 ЕКБ (UTC+5)
   workflow_dispatch:
 
 jobs:
   generate:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,9 +37,11 @@ jobs:
 
       - name: Commit and push if changed
         run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
           git add subscription.txt subscription_base64.txt
+
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
