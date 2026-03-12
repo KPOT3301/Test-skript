@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
-# Переведён с Xray на sing-box
-# Добавлены протоколы VMess и Hysteria2, ужесточение критериев: HTTPS для TLS,
-# отсев по latency (TCP) сразу после первого этапа, упрощённый лог.
-# Оптимизация: флаг и город определяются сразу после TCP, реальная проверка только для серверов с флагом
-# Ускорение: 30 потоков, задержка 1с, таймаут 15с, все проверки однократные.
+# Ядро: sing‑box
+# Логи: INFO – только основные этапы и статистика по источникам, DEBUG – детали загрузки.
+# Добавлен вывод количества ключей из каждого источника в процессе сбора.
+# После TCP‑проверки оставляем только уникальные пары (IP, порт) с наименьшей задержкой.
+# Подавлены предупреждения InsecureRequestWarning.
 
 import os
 import re
@@ -16,10 +16,14 @@ import time
 import json
 import tempfile
 import sys
+import warnings
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from datetime import datetime
+from urllib3.exceptions import InsecureRequestWarning
+
+warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
 # ---------- НАСТРОЙКА ЛОГИРОВАНИЯ ----------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -69,7 +73,7 @@ OUTPUT_FILE = "subscription.txt"
 OUTPUT_BASE64_FILE = "subscription_base64.txt"
 REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-SING_BOX_PATH = "sing-box"                     # замена Xray на sing-box
+SING_BOX_PATH = "sing-box"
 
 # TCP-проверка
 TCP_CHECK_TIMEOUT = 10
@@ -79,7 +83,7 @@ TCP_MAX_WORKERS = 400
 SOCKS_PORT = 8080
 REAL_CHECK_TIMEOUT = 15
 REAL_CHECK_CONCURRENCY = 30
-SING_BOX_STARTUP_DELAY = 1                      # задержка после запуска sing-box
+SING_BOX_STARTUP_DELAY = 1
 
 TEST_URLS = [
     "http://connectivitycheck.gstatic.com/generate_204"
@@ -148,18 +152,17 @@ def read_sources():
     return sources
 
 def fetch_content(url):
-    logging.info(f"⬇️ Загружаю: {url}")
+    logging.debug(f"⬇️ Загружаю: {url}")
     try:
         resp = requests.get(url, timeout=REQUEST_TIMEOUT, headers={'User-Agent': USER_AGENT})
         resp.raise_for_status()
-        logging.info(f"✅ Загружено {len(resp.text)} байт")
+        logging.debug(f"✅ Загружено {len(resp.text)} байт")
         return resp.text
     except Exception as e:
         logging.warning(f"⚠️ Не удалось загрузить {url}: {e}")
         return None
 
 def extract_links_from_text(text):
-    # Добавлены vmess и hysteria2/hy2
     return re.findall(r'(?:vless|ss|trojan|vmess|hysteria2|hy2)://[^\s<>"\']+', text)
 
 def decode_base64_content(encoded):
@@ -173,20 +176,32 @@ def gather_all_links(sources):
     logging.info(f"🔍 Сбор ссылок из {len(sources)} источников...")
     all_links = set()
     for idx, src in enumerate(sources, 1):
-        logging.info(f"📦 [{idx}/{len(sources)}] {src[:60]}...")
+        # Укорачиваем URL для лога
+        short_src = src[:60] + ('...' if len(src) > 60 else '')
+
+        # Прямые ссылки (уже готовые ключи)
         if src.startswith(('vless://', 'ss://', 'trojan://', 'vmess://', 'hysteria2://', 'hy2://')):
             all_links.add(src)
+            logging.info(f"[{idx}/{len(sources)}] {short_src} → 1 ключ (прямая ссылка)")
             continue
+
         content = fetch_content(src)
         if not content:
+            # Ошибка загрузки – уже есть warning в fetch_content
+            logging.info(f"[{idx}/{len(sources)}] {short_src} → 0 ключей (ошибка загрузки)")
             continue
+
         decoded = decode_base64_content(content)
         links = extract_links_from_text(content)
         if decoded != content:
             links.extend(extract_links_from_text(decoded))
+
+        # Добавляем все уникальные ссылки
         for link in links:
             all_links.add(link)
-        logging.info(f"🔗 Получено {len(links)} ссылок")
+
+        logging.info(f"[{idx}/{len(sources)}] {short_src} → {len(links)} ключей")
+
     logging.info(f"🎯 Всего уникальных ссылок: {len(all_links)}")
     return list(all_links)
 
@@ -296,7 +311,6 @@ def parse_trojan_link(link):
         network = params.get('type', ['tcp'])[0]
         security = params.get('security', ['tls'])[0]
 
-        # WebSocket parameters
         path = None
         host_header = None
         if network == 'ws':
@@ -323,7 +337,7 @@ def parse_trojan_link(link):
 
 def parse_vmess_link(link):
     try:
-        b64_part = link[8:]  # после vmess://
+        b64_part = link[8:]
         if '#' in b64_part:
             b64_part = b64_part.split('#')[0]
         decoded = base64.b64decode(b64_part).decode('utf-8')
@@ -419,7 +433,6 @@ def parse_link(link):
         return None
 
 def shorten_link(link):
-    """Возвращает сокращённое представление ссылки: протокол://хост:порт"""
     parsed = parse_link(link)
     if parsed:
         return f"{parsed['protocol']}://{parsed['host']}:{parsed['port']}"
@@ -430,10 +443,6 @@ def shorten_link(link):
 
 # ---------- СОЗДАНИЕ КОНФИГА SING-BOX ----------
 def create_singbox_config(config):
-    """
-    Генерирует конфигурацию sing-box на основе распаршенных данных сервера.
-    Возвращает словарь конфига или None при ошибке.
-    """
     inbound = {
         "type": "socks",
         "tag": "socks-in",
@@ -446,7 +455,6 @@ def create_singbox_config(config):
 
     protocol = config['protocol']
 
-    # ----- Shadowsocks -----
     if protocol == 'ss':
         outbound = {
             "type": "shadowsocks",
@@ -457,7 +465,6 @@ def create_singbox_config(config):
             "password": config['password']
         }
 
-    # ----- Trojan -----
     elif protocol == 'trojan':
         outbound = {
             "type": "trojan",
@@ -466,13 +473,11 @@ def create_singbox_config(config):
             "server_port": config['port'],
             "password": config['password']
         }
-        # TLS
         outbound["tls"] = {
             "enabled": True,
             "server_name": config.get('sni', config['host']),
             "insecure": config.get('allow_insecure', False)
         }
-        # Transport (WebSocket)
         if config.get('network') == 'ws' and config.get('path'):
             outbound["transport"] = {
                 "type": "ws",
@@ -482,7 +487,6 @@ def create_singbox_config(config):
                 }
             }
 
-    # ----- VLESS -----
     elif protocol == 'vless':
         outbound = {
             "type": "vless",
@@ -499,7 +503,7 @@ def create_singbox_config(config):
             tls_settings = {
                 "enabled": True,
                 "server_name": config.get('sni', config['host']),
-                "insecure": False   # в vless обычно нет флага insecure
+                "insecure": False
             }
             if security == 'reality':
                 tls_settings["reality"] = {
@@ -511,7 +515,6 @@ def create_singbox_config(config):
                     tls_settings["reality"]["spider_x"] = config['spx']
             outbound["tls"] = tls_settings
 
-        # Transport
         if config.get('type') == 'ws':
             outbound["transport"] = {
                 "type": "ws",
@@ -521,7 +524,6 @@ def create_singbox_config(config):
                 }
             }
 
-    # ----- VMess -----
     elif protocol == 'vmess':
         outbound = {
             "type": "vmess",
@@ -546,7 +548,6 @@ def create_singbox_config(config):
                 }
             }
 
-    # ----- Hysteria2 -----
     elif protocol == 'hysteria2':
         outbound = {
             "type": "hysteria2",
@@ -577,7 +578,6 @@ def create_singbox_config(config):
         logging.debug(f"Неподдерживаемый протокол: {protocol}")
         return None
 
-    # Полная конфигурация sing-box
     sb_config = {
         "log": {"level": "error"},
         "inbounds": [inbound],
@@ -590,7 +590,7 @@ def create_singbox_config(config):
     }
     return sb_config
 
-# ---------- TCP ПРОВЕРКА (возвращает IP и задержку при успехе) ----------
+# ---------- TCP ПРОВЕРКА ----------
 def check_tcp(link):
     parsed = parse_link(link)
     if not parsed:
@@ -608,7 +608,7 @@ def check_tcp(link):
     except:
         return (link, False, None, None)
 
-# ---------- РЕАЛЬНАЯ ПРОВЕРКА (однократная, без повторов) ----------
+# ---------- РЕАЛЬНАЯ ПРОВЕРКА ----------
 def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
@@ -635,7 +635,6 @@ def check_real(link):
             'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
         }
 
-        # Определяем, нужно ли проверять HTTPS (для TLS-ключей)
         needs_https = False
         if config_dict['protocol'] in ('vless', 'vmess', 'trojan', 'hysteria2'):
             if config_dict['protocol'] == 'vmess':
@@ -647,7 +646,6 @@ def check_real(link):
                 if security in ('tls', 'reality'):
                     needs_https = True
 
-        # Однократная HTTP-проверка (перебираем тестовые URL, пока один не сработает)
         http_success = False
         for test_url in TEST_URLS:
             try:
@@ -663,17 +661,14 @@ def check_real(link):
         if not http_success:
             return (link, False)
 
-        # Однократная дополнительная проверка HTTPS (если нужна)
         if needs_https:
             try:
                 https_test = "https://www.google.com/generate_204"
                 requests.get(https_test, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
                              headers={'User-Agent': USER_AGENT}, verify=False)
-                # если дошли до сюда – успех
             except Exception:
                 return (link, False)
 
-        # Все проверки пройдены
         return (link, True)
 
     except Exception as e:
@@ -689,13 +684,12 @@ def check_real(link):
         if os.path.exists(config_path):
             os.unlink(config_path)
 
-# ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ С ОТСЕВОМ ПО TCP-ЗАДЕРЖКЕ ----------
+# ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ ----------
 def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
     logging.info(f"🚀 Начинаю двухуровневую проверку {total_checks} ссылок")
 
-    # Этап 1: TCP-проверка + замер задержки
     logging.info(f"🌐 Этап 1: TCP-проверка {total_checks} ссылок...")
     tcp_success = []  # (link, ip, latency_ms)
     with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
@@ -703,34 +697,44 @@ def filter_working_links(links):
         for future in as_completed(future_to_link):
             current_check += 1
             link, ok, ip, latency = future.result()
-            if ok and ip and latency is not None:
-                # Отсев по задержке
-                if latency <= MAX_LATENCY_MS:
-                    tcp_success.append((link, ip, latency))
+            if ok and ip and latency is not None and latency <= MAX_LATENCY_MS:
+                tcp_success.append((link, ip, latency))
+
     logging.info(f"📊 TCP-проверка завершена. Прошли (latency <= {MAX_LATENCY_MS} мс): {len(tcp_success)}/{total_checks}")
 
     if not tcp_success:
         return []
 
-    # Определяем флаги и города для прошедших TCP
-    logging.info(f"🌍 Определение геоданных для {len(tcp_success)} серверов...")
-    geo_by_link = {}  # link -> (flag, city)
-    for link, ip, _ in tcp_success:
+    # Фильтрация по уникальной паре (IP, порт) – оставляем лучшую latency
+    best_by_endpoint = {}  # ключ (ip, port) -> (link, latency)
+    for link, ip, latency in tcp_success:
+        parsed = parse_link(link)
+        if not parsed:
+            continue
+        port = parsed['port']
+        key = (ip, port)
+        if key not in best_by_endpoint or latency < best_by_endpoint[key][1]:
+            best_by_endpoint[key] = (link, latency)
+
+    unique_tcp = [(link, ip, latency) for (ip, port), (link, latency) in best_by_endpoint.items()]
+    logging.info(f"🗂️ Уникальных (IP:порт) после TCP: {len(unique_tcp)} из {len(tcp_success)}")
+
+    # Определяем геоданные
+    logging.info(f"🌍 Определение геоданных для {len(unique_tcp)} серверов...")
+    geo_by_link = {}
+    for link, ip, _ in unique_tcp:
         flag, city = get_geo_info(ip) if ip else ("", "")
         if flag:
             geo_by_link[link] = (flag, city)
 
     logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
-
     if not geo_by_link:
         return []
 
-    # Этап 2: реальная проверка только для серверов с флагами
     logging.info(f"🧪 Этап 2: Реальная проверка {len(geo_by_link)} ссылок...")
-    working_links_with_geo = []  # (link, flag, city)
+    working_links_with_geo = []
     stage_total = len(geo_by_link)
     stage_current = 0
-
     links_to_check = list(geo_by_link.keys())
 
     with ThreadPoolExecutor(max_workers=REAL_CHECK_CONCURRENCY) as executor:
@@ -742,7 +746,6 @@ def filter_working_links(links):
             link, is_working = future.result()
             short = shorten_link(link)
 
-            # Определяем протокол
             if link.startswith('vless://'):
                 proto = 'vless'
             elif link.startswith('ss://'):
@@ -770,7 +773,7 @@ def filter_working_links(links):
     logging.info(f"📊 Реальная проверка завершена. Рабочих с флагами: {len(working_links_with_geo)}/{stage_total}")
     return working_links_with_geo
 
-# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ (С ФЛАГАМИ И ГОРОДАМИ) ----------
+# ---------- СОХРАНЕНИЕ РЕЗУЛЬТАТОВ ----------
 def save_working_links(links_with_geo):
     logging.info(f"💾 Сохраняю {len(links_with_geo)} серверов с геоданными...")
     if not links_with_geo:
@@ -823,7 +826,7 @@ def check_singbox_available():
 # ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск генератора подписок (ядро: sing-box; протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, sing-box=15с, отсев по TCP latency >300 мс, все проверки однократные)")
+    logging.info("🟢 Запуск генератора подписок (ядро: sing-box; протоколы: Vless, SS, Trojan, VMess, Hysteria2)")
     if not check_singbox_available():
         logging.error("sing-box обязателен. Завершение.")
         return
