@@ -12,7 +12,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # нужна полная история для корректного pull/rebase
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,12 +24,20 @@ jobs:
           pip install -r requirements.txt
           pip install geoip2
 
-      - name: Download Xray-core
+      - name: Get latest sing-box version
+        id: get_version
         run: |
-          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip -q Xray-linux-64.zip -d xray-core
-          chmod +x xray-core/xray
-          echo "$(pwd)/xray-core" >> $GITHUB_PATH
+          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.assets[] | select(.name | contains("linux-amd64")) | .browser_download_url')
+          echo "LATEST_URL=$LATEST_URL" >> $GITHUB_ENV
+
+      - name: Download and install sing-box
+        run: |
+          wget -q ${{ env.LATEST_URL }} -O sing-box.tar.gz
+          tar -xzf sing-box.tar.gz
+          find . -type f -name "sing-box" -exec mv {} sing-box \;
+          chmod +x sing-box
+          sudo mv sing-box /usr/local/bin/
+          rm -rf sing-box.tar.gz
 
       - name: Run GENERATOR.py
         run: python GENERATOR.py
@@ -46,4 +54,3 @@ jobs:
             git pull --rebase origin main
             git push
           fi
-          
