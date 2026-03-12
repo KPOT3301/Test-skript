@@ -2,9 +2,8 @@
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Добавлена TLS-проверка после TCP (многопоточная), реальная проверка через sing-box.
 # Рандомный User-Agent, российские ключи идут первыми в подписке.
-# Логирование успешных TLS-соединений, увеличенные таймауты, резервный URL, чтение stderr sing-box,
-# проверка открытия порта после запуска, детальные логи для отладки.
-# ИСПРАВЛЕНО: корректный формат конфига sing-box (без поля "options", правильные имена типов).
+# Логирование успешных TLS-соединений, увеличенные таймауты, резервный URL, чтение stderr sing-box.
+# ИСПРАВЛЕНО: корректный формат конфига sing-box (без поля "transport" для tcp, уникальные порты для каждого потока).
 
 import os
 import re
@@ -18,6 +17,7 @@ import json
 import tempfile
 import sys
 import random
+import threading
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
@@ -96,7 +96,8 @@ TLS_CHECK_TIMEOUT = 5
 TLS_MAX_WORKERS = 100
 
 # Реальная проверка (увеличенные таймауты)
-SOCKS_PORT = 1080
+SOCKS_BASE_PORT = 10000          # базовый порт для динамического выделения
+SOCKS_PORT_RANGE = 1000           # количество доступных портов
 REAL_CHECK_TIMEOUT = 20
 REAL_CHECK_CONCURRENCY = 30
 SING_BOX_STARTUP_DELAY = 3
@@ -108,6 +109,17 @@ TEST_URLS = [
 ]
 
 MAX_LATENCY_MS = 300
+
+# ---------- ДИНАМИЧЕСКОЕ ВЫДЕЛЕНИЕ ПОРТОВ ----------
+_port_counter = 0
+_port_lock = threading.Lock()
+
+def get_next_port():
+    global _port_counter
+    with _port_lock:
+        port = SOCKS_BASE_PORT + (_port_counter % SOCKS_PORT_RANGE)
+        _port_counter += 1
+        return port
 
 # ---------- GEOIP ЗАГРУЗКА (CITY) ----------
 GEOIP_DB_PATH = "GeoLite2-City.mmdb"
@@ -462,7 +474,7 @@ def needs_tls_check(parsed):
     return security in ('tls', 'reality')
 
 # ---------- СОЗДАНИЕ КОНФИГА SING-BOX (ИСПРАВЛЕННАЯ ВЕРСИЯ) ----------
-def create_singbox_config(config):
+def create_singbox_config(config, socks_port):
     protocol = config['protocol']
     
     # Базовый outbound (общие поля)
@@ -485,15 +497,14 @@ def create_singbox_config(config):
         outbound["uuid"] = config['uuid']
         outbound["security"] = config.get('security', 'auto')
         outbound["alter_id"] = 0  # обычно 0 для современных
-        # Транспорт
+        # Транспорт – только если не tcp
         if config.get('type') == 'ws':
             outbound["transport"] = {
                 "type": "ws",
                 "path": config.get('path', '/'),
                 "headers": {"Host": config.get('host_header', config['host'])}
             }
-        else:
-            outbound["transport"] = {"type": "tcp"}
+        # Для tcp поле transport не указываем (по умолчанию tcp)
         # TLS
         if config.get('tls'):
             outbound["tls"] = {
@@ -509,8 +520,8 @@ def create_singbox_config(config):
         outbound["type"] = "vless"
         outbound["uuid"] = config['uuid']
         outbound["flow"] = config.get('flow', '')
-        outbound["packet_encoding"] = "xudp"  # можно добавить параметр, если нужно
-        # Транспорт
+        outbound["packet_encoding"] = "xudp"
+        # Транспорт – только если не tcp
         if config.get('type') == 'ws':
             outbound["transport"] = {
                 "type": "ws",
@@ -522,8 +533,7 @@ def create_singbox_config(config):
                 "type": "grpc",
                 "service_name": config.get('serviceName', '')
             }
-        else:
-            outbound["transport"] = {"type": "tcp"}
+        # Для tcp поле transport не указываем
         # TLS / Reality
         if config.get('security') in ('tls', 'reality'):
             tls_config = {
@@ -545,14 +555,14 @@ def create_singbox_config(config):
     elif protocol == 'trojan':
         outbound["type"] = "trojan"
         outbound["password"] = config['password']
+        # Транспорт
         if config.get('type') == 'ws':
             outbound["transport"] = {
                 "type": "ws",
                 "path": config.get('path', '/'),
                 "headers": {"Host": config.get('host_header', config['host'])}
             }
-        else:
-            outbound["transport"] = {"type": "tcp"}
+        # Для tcp не указываем transport
         if config.get('security') == 'tls':
             outbound["tls"] = {
                 "enabled": True,
@@ -590,7 +600,7 @@ def create_singbox_config(config):
             "type": "socks",
             "tag": "socks-in",
             "listen": "127.0.0.1",
-            "listen_port": SOCKS_PORT,
+            "listen_port": socks_port,
             "users": []
         }],
         "outbounds": [outbound]
@@ -620,7 +630,11 @@ def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
         return (link, False)
-    sb_config = create_singbox_config(config_dict)
+    
+    # Получаем уникальный порт для этого потока
+    socks_port = get_next_port()
+    
+    sb_config = create_singbox_config(config_dict, socks_port)
     if not sb_config:
         logging.debug(f"Не удалось создать конфиг sing-box для {shorten_link(link)}")
         return (link, False)
@@ -628,11 +642,11 @@ def check_real(link):
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         config_path = f.name
         json.dump(sb_config, f, indent=2)
-        logging.debug(f"Конфиг для {shorten_link(link)} сохранён в {config_path}")
+        logging.debug(f"Конфиг для {shorten_link(link)} сохранён в {config_path} (порт {socks_port})")
 
     process = None
     try:
-        logging.debug(f"Запуск sing-box для {shorten_link(link)}")
+        logging.debug(f"Запуск sing-box для {shorten_link(link)} на порту {socks_port}")
         process = subprocess.Popen(
             [SING_BOX_PATH, 'run', '-c', config_path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -648,15 +662,15 @@ def check_real(link):
         # Проверяем, открыт ли порт
         sock_check = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock_check.settimeout(2)
-        result = sock_check.connect_ex(('127.0.0.1', SOCKS_PORT))
+        result = sock_check.connect_ex(('127.0.0.1', socks_port))
         sock_check.close()
         if result != 0:
-            logging.error(f"Порт {SOCKS_PORT} не открыт после запуска sing-box для {shorten_link(link)}")
+            logging.error(f"Порт {socks_port} не открыт после запуска sing-box для {shorten_link(link)}")
             return (link, False)
 
         proxies = {
-            'http': f'socks5h://127.0.0.1:{SOCKS_PORT}',
-            'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
+            'http': f'socks5h://127.0.0.1:{socks_port}',
+            'https': f'socks5h://127.0.0.1:{socks_port}'
         }
 
         needs_https = False
