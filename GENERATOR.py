@@ -4,11 +4,10 @@
 # Добавлен случайный выбор User-Agent из списка популярных.
 # Добавлена статистика по источникам: сколько ссылок получено из каждого.
 # На этапе TCP-проверки добавлена проверка наличия explicit SNI (ключи без SNI отбрасываются).
-# Дедупликация по IP выполняется перед реальной проверкой (остаётся сервер с наименьшей задержкой).
+# Дедупликация по IP выполняется ДО TCP-проверки (остаётся одна ссылка на IP).
 # Замер времени HTTP/HTTPS запросов и отсев медленных.
 # Расширен список тестовых URL.
 # В announce используется только дата (без секунд) для меньшего числа коммитов.
-# ИЗМЕНЕНИЕ: убрана проверка наличия флага – все серверы, прошедшие TCP, участвуют в реальной проверке.
 
 import os
 import re
@@ -466,6 +465,35 @@ def shorten_link(link):
         return link[:q_pos]
     return link[:80]
 
+# ---------- ПОЛУЧЕНИЕ IP ДЛЯ ДЕДУПЛИКАЦИИ (без TCP-соединения) ----------
+def resolve_ip_for_link(link):
+    """Быстрое разрешение домена в IP (без проверки порта). Возвращает (link, ip) или (link, None) при ошибке."""
+    parsed = parse_link(link)
+    if not parsed:
+        return link, None
+    host = parsed['host']
+    try:
+        ip = resolve_host(host)
+        return link, ip
+    except:
+        return link, None
+
+def deduplicate_by_ip_before_tcp(links):
+    """Дедупликация по IP до TCP-проверки: оставляем только одну ссылку на каждый IP (первую попавшуюся)."""
+    ip_to_link = {}
+    resolved_count = 0
+    with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
+        future_to_link = {executor.submit(resolve_ip_for_link, link): link for link in links}
+        for future in as_completed(future_to_link):
+            link, ip = future.result()
+            if ip:
+                resolved_count += 1
+                if ip not in ip_to_link:
+                    ip_to_link[ip] = link
+    unique_links = list(ip_to_link.values())
+    logging.info(f"🔍 Разрешено IP: {resolved_count} из {len(links)} ссылок. Уникальных IP: {len(unique_links)}")
+    return unique_links
+
 # ---------- СОЗДАНИЕ КОНФИГА XRAY ----------
 def create_xray_config(config, socks_port):
     base_config = {
@@ -768,7 +796,7 @@ def check_real(link):
         if os.path.exists(config_path):
             os.unlink(config_path)
 
-# ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ ----------
+# ---------- ДВУХУРОВНЕВАЯ ФИЛЬТРАЦИЯ (теперь без внутренней дедупликации) ----------
 def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
@@ -789,31 +817,20 @@ def filter_working_links(links):
     if not tcp_success:
         return []
 
-    # Геоданные – теперь добавляем все серверы, даже если флаг не определён
+    # Геоданные – добавляем все серверы, прошедшие TCP
     candidates = []  # (link, flag, city, country_code, latency, ip)
     for link, ip, latency in tcp_success:
         flag, city, country_code = get_geo_info(ip) if ip else ("", "", "")
         candidates.append((link, flag, city, country_code, latency, ip))
 
-    logging.info(f"🧾 Серверов после TCP: {len(candidates)}")
+    logging.info(f"🧾 Серверов с геоданными: {len(candidates)}")
 
     if not candidates:
         return []
 
-    # ----- ДЕДУПЛИКАЦИЯ ПО IP ПЕРЕД РЕАЛЬНОЙ ПРОВЕРКОЙ -----
-    best_by_ip = {}
-    for cand in candidates:
-        link, flag, city, country_code, latency, ip = cand
-        if ip not in best_by_ip or latency < best_by_ip[ip][4]:
-            best_by_ip[ip] = cand
-    deduplicated_candidates = list(best_by_ip.values())
-    removed = len(candidates) - len(deduplicated_candidates)
-    if removed > 0:
-        logging.info(f"🗑 Удалено дубликатов по IP перед реальной проверкой: {removed}")
-
     # Строим словарь для быстрого доступа и список ссылок для проверки
-    candidate_info = {c[0]: c[1:] for c in deduplicated_candidates}  # link -> (flag, city, country_code, latency, ip)
-    links_to_check = [c[0] for c in deduplicated_candidates]
+    candidate_info = {c[0]: c[1:] for c in candidates}  # link -> (flag, city, country_code, latency, ip)
+    links_to_check = [c[0] for c in candidates]
     total_to_check = len(links_to_check)
     processed = 0
 
@@ -895,11 +912,15 @@ def main():
     if not all_links:
         return
 
+    # Дедупликация по IP до TCP-проверки
+    unique_links = deduplicate_by_ip_before_tcp(all_links)
+    logging.info(f"🗑 После дедупликации по IP осталось {len(unique_links)} ссылок (из {len(all_links)})")
+
     record_counter = 0
     current_check = 0
-    total_checks = len(all_links)
+    total_checks = len(unique_links)
 
-    working_links_with_geo = filter_working_links(all_links)
+    working_links_with_geo = filter_working_links(unique_links)
 
     # Разделяем на российские и остальные
     rus_links = [item for item in working_links_with_geo if item[3] == 'RU']
