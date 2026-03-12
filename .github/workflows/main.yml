@@ -12,7 +12,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # нужна полная история для корректного pull/rebase
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,14 +30,22 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install geoip2
+          # geoip2 уже указан в requirements.txt, можно не дублировать
+          # но если его там нет, добавьте:
+          # pip install geoip2
 
-      - name: Download Xray-core
+      - name: Download sing-box
         run: |
-          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip -q Xray-linux-64.zip -d xray-core
-          chmod +x xray-core/xray
-          echo "$(pwd)/xray-core" >> $GITHUB_PATH
+          # Определяем последнюю версию (можно указать фиксированную)
+          VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep tag_name | cut -d '"' -f4)
+          ARCH="linux-amd64"
+          FILENAME="sing-box-${VERSION}-${ARCH}.tar.gz"
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/${VERSION}/${FILENAME}"
+          tar -xzf ${FILENAME}
+          # Внутри архива папка с именем типа sing-box-1.9.3-linux-amd64, и внутри бинарник
+          mv sing-box-*-${ARCH}/sing-box ./sing-box
+          chmod +x ./sing-box
+          echo "$(pwd)" >> $GITHUB_PATH   # добавляем текущую директорию в PATH
 
       - name: Run GENERATOR.py
         run: python GENERATOR.py
