@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
-# Добавлена TLS-проверка после TCP, реальная проверка через sing-box.
+# Добавлена TLS-проверка после TCP (многопоточная), реальная проверка через sing-box.
 # Рандомный User-Agent, российские ключи идут первыми в подписке.
 
 import os
@@ -90,6 +90,7 @@ TCP_MAX_WORKERS = 400
 
 # TLS-проверка
 TLS_CHECK_TIMEOUT = 5
+TLS_MAX_WORKERS = 100  # отдельный пул для TLS
 
 # Реальная проверка
 SOCKS_PORT = 1080
@@ -205,7 +206,7 @@ def gather_all_links(sources):
     logging.info(f"🎯 Всего уникальных ссылок: {len(all_links)}")
     return list(all_links)
 
-# ---------- ПАРСЕРЫ (без изменений) ----------
+# ---------- ПАРСЕРЫ ----------
 def parse_vless_link(link):
     try:
         without_proto = link[8:]
@@ -661,12 +662,13 @@ def check_real(link):
         if os.path.exists(config_path):
             os.unlink(config_path)
 
-# ---------- ФИЛЬТРАЦИЯ ----------
+# ---------- ФИЛЬТРАЦИЯ С МНОГОПОТОЧНОЙ TLS-ПРОВЕРКОЙ ----------
 def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
     logging.info(f"🚀 Начинаю двухуровневую проверку {total_checks} ссылок")
 
+    # Этап 1: TCP-проверка + замер задержки
     logging.info(f"🌐 Этап 1: TCP-проверка {total_checks} ссылок...")
     tcp_success = []
     with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
@@ -681,6 +683,7 @@ def filter_working_links(links):
     if not tcp_success:
         return []
 
+    # Определяем флаги и города для прошедших TCP
     logging.info(f"🌍 Определение геоданных для {len(tcp_success)} серверов...")
     geo_by_link = {}
     for link, ip, _ in tcp_success:
@@ -693,24 +696,35 @@ def filter_working_links(links):
     if not geo_by_link:
         return []
 
+    # Этап 1.5: Многопоточная TLS-проверка
     logging.info(f"🔒 Этап 1.5: TLS-проверка {len(geo_by_link)} ссылок...")
     tls_passed = []
-    for link, (flag, city, parsed) in geo_by_link.items():
-        if parsed and needs_tls_check(parsed):
-            host = parsed['host']
-            port = parsed['port']
-            sni = parsed.get('sni', host)
-            if check_tls(host, port, sni):
+    tls_futures = {}
+
+    with ThreadPoolExecutor(max_workers=TLS_MAX_WORKERS) as executor:
+        for link, (flag, city, parsed) in geo_by_link.items():
+            if parsed and needs_tls_check(parsed):
+                host = parsed['host']
+                port = parsed['port']
+                sni = parsed.get('sni', host)
+                future = executor.submit(check_tls, host, port, sni)
+                tls_futures[future] = (link, flag, city, parsed)
+            else:
+                # Протоколы без TLS сразу добавляем
+                tls_passed.append((link, flag, city, parsed))
+
+        for future in as_completed(tls_futures):
+            link, flag, city, parsed = tls_futures[future]
+            if future.result():
                 tls_passed.append((link, flag, city, parsed))
             else:
                 logging.debug(f"TLS failed for {shorten_link(link)}")
-        else:
-            tls_passed.append((link, flag, city, parsed))
 
     logging.info(f"✅ TLS-проверка пройдена: {len(tls_passed)}/{len(geo_by_link)}")
     if not tls_passed:
         return []
 
+    # Этап 2: реальная проверка через sing-box
     logging.info(f"🧪 Этап 2: Реальная проверка {len(tls_passed)} ссылок...")
     working_links_with_geo = []
     stage_total = len(tls_passed)
@@ -749,8 +763,6 @@ def filter_working_links(links):
 
 # ---------- СОРТИРОВКА: СНАЧАЛА РОССИЙСКИЕ ----------
 def sort_ru_first(links_with_geo):
-    """Сортирует список кортежей (link, flag, city): сначала российские, потом остальные."""
-    # flag может быть None или пустым, но в нашем случае всегда непустой
     ru_flag = '🇷🇺'
     ru = [item for item in links_with_geo if item[1] == ru_flag]
     others = [item for item in links_with_geo if item[1] != ru_flag]
@@ -763,7 +775,6 @@ def save_working_links(links_with_geo):
         logging.warning("Нет серверов для сохранения.")
         return 0
 
-    # Сортируем: сначала российские
     sorted_links = sort_ru_first(links_with_geo)
 
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
