@@ -2,7 +2,9 @@
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Добавлена TLS-проверка после TCP (многопоточная), реальная проверка через sing-box.
 # Рандомный User-Agent, российские ключи идут первыми в подписке.
-# Логирование успешных TLS-соединений, увеличенные таймауты, резервный URL, чтение stderr sing-box.
+# Логирование успешных TLS-соединений, увеличенные таймауты, резервный URL, чтение stderr sing-box,
+# проверка открытия порта после запуска, детальные логи для отладки.
+# ИСПРАВЛЕНО: корректный формат конфига sing-box (без поля "options", правильные имена типов).
 
 import os
 import re
@@ -95,9 +97,9 @@ TLS_MAX_WORKERS = 100
 
 # Реальная проверка (увеличенные таймауты)
 SOCKS_PORT = 1080
-REAL_CHECK_TIMEOUT = 20           # увеличен с 15 до 20
+REAL_CHECK_TIMEOUT = 20
 REAL_CHECK_CONCURRENCY = 30
-SING_BOX_STARTUP_DELAY = 3        # увеличен с 1 до 3
+SING_BOX_STARTUP_DELAY = 3
 
 # Тестовые URL (добавлен резервный)
 TEST_URLS = [
@@ -459,103 +461,125 @@ def needs_tls_check(parsed):
     security = parsed.get('security', 'none')
     return security in ('tls', 'reality')
 
-# ---------- СОЗДАНИЕ КОНФИГА SING-BOX ----------
+# ---------- СОЗДАНИЕ КОНФИГА SING-BOX (ИСПРАВЛЕННАЯ ВЕРСИЯ) ----------
 def create_singbox_config(config):
     protocol = config['protocol']
+    
+    # Базовый outbound (общие поля)
     outbound = {
-        "type": protocol,
         "tag": "proxy",
         "server": config['host'],
-        "server_port": config['port'],
-        "options": {}
+        "server_port": config['port']
     }
 
-    if protocol == 'vless':
-        outbound['options'] = {
-            "uuid": config['uuid'],
-            "flow": config.get('flow', ''),
-            "network": config.get('type', 'tcp')
-        }
-        if config.get('security') in ('tls', 'reality'):
-            tls_opts = {
+    # Shadowsocks
+    if protocol == 'ss':
+        outbound["type"] = "shadowsocks"
+        outbound["method"] = config['method']
+        outbound["password"] = config['password']
+        # Нет transport/tls
+
+    # VMess
+    elif protocol == 'vmess':
+        outbound["type"] = "vmess"
+        outbound["uuid"] = config['uuid']
+        outbound["security"] = config.get('security', 'auto')
+        outbound["alter_id"] = 0  # обычно 0 для современных
+        # Транспорт
+        if config.get('type') == 'ws':
+            outbound["transport"] = {
+                "type": "ws",
+                "path": config.get('path', '/'),
+                "headers": {"Host": config.get('host_header', config['host'])}
+            }
+        else:
+            outbound["transport"] = {"type": "tcp"}
+        # TLS
+        if config.get('tls'):
+            outbound["tls"] = {
                 "enabled": True,
                 "server_name": config.get('sni', config['host']),
                 "utls": {"enabled": True, "fingerprint": config.get('fp', 'chrome')}
             }
-            if config.get('security') == 'reality':
-                tls_opts["reality"] = {
-                    "enabled": True,
-                    "public_key": config.get('pbk', ''),
-                    "short_id": config.get('sid', '')
-                }
-            outbound['options']["tls"] = tls_opts
+        else:
+            outbound["tls"] = {"enabled": False}
+
+    # VLess
+    elif protocol == 'vless':
+        outbound["type"] = "vless"
+        outbound["uuid"] = config['uuid']
+        outbound["flow"] = config.get('flow', '')
+        outbound["packet_encoding"] = "xudp"  # можно добавить параметр, если нужно
+        # Транспорт
         if config.get('type') == 'ws':
-            outbound['options']["transport"] = {
+            outbound["transport"] = {
                 "type": "ws",
                 "path": config.get('path', '/'),
                 "headers": {"Host": config.get('host_header', config['host'])}
             }
         elif config.get('type') == 'grpc':
-            outbound['options']["transport"] = {
+            outbound["transport"] = {
                 "type": "grpc",
                 "service_name": config.get('serviceName', '')
             }
-
-    elif protocol == 'vmess':
-        outbound['options'] = {
-            "uuid": config['uuid'],
-            "security": config.get('security', 'auto'),
-            "network": config.get('type', 'tcp')
-        }
-        if config.get('tls'):
-            tls_opts = {
+        else:
+            outbound["transport"] = {"type": "tcp"}
+        # TLS / Reality
+        if config.get('security') in ('tls', 'reality'):
+            tls_config = {
                 "enabled": True,
                 "server_name": config.get('sni', config['host']),
                 "utls": {"enabled": True, "fingerprint": config.get('fp', 'chrome')}
             }
-            outbound['options']["tls"] = tls_opts
+            if config.get('security') == 'reality':
+                tls_config["reality"] = {
+                    "enabled": True,
+                    "public_key": config.get('pbk', ''),
+                    "short_id": config.get('sid', '')
+                }
+            outbound["tls"] = tls_config
+        else:
+            outbound["tls"] = {"enabled": False}
+
+    # Trojan
+    elif protocol == 'trojan':
+        outbound["type"] = "trojan"
+        outbound["password"] = config['password']
         if config.get('type') == 'ws':
-            outbound['options']["transport"] = {
+            outbound["transport"] = {
                 "type": "ws",
                 "path": config.get('path', '/'),
                 "headers": {"Host": config.get('host_header', config['host'])}
             }
-
-    elif protocol == 'ss':
-        outbound['options'] = {
-            "method": config['method'],
-            "password": config['password']
-        }
-
-    elif protocol == 'trojan':
-        outbound['options'] = {
-            "password": config['password']
-        }
+        else:
+            outbound["transport"] = {"type": "tcp"}
         if config.get('security') == 'tls':
-            tls_opts = {
+            outbound["tls"] = {
                 "enabled": True,
                 "server_name": config.get('sni', config['host']),
                 "utls": {"enabled": True, "fingerprint": config.get('fp', 'chrome')}
             }
-            outbound['options']["tls"] = tls_opts
+        else:
+            outbound["tls"] = {"enabled": False}
 
+    # Hysteria2
     elif protocol == 'hysteria2':
-        outbound['options'] = {
-            "password": config['password'],
-            "tls": {
-                "enabled": True,
-                "server_name": config.get('sni', config['host']),
-                "insecure": config.get('allow_insecure', False)
-            }
+        outbound["type"] = "hysteria2"
+        outbound["password"] = config['password']
+        outbound["tls"] = {
+            "enabled": True,
+            "server_name": config.get('sni', config['host']),
+            "insecure": config.get('allow_insecure', False)
         }
         if config.get('up') or config.get('down'):
-            outbound['options']["bandwidth"] = {}
+            outbound["bandwidth"] = {}
             if config.get('up'):
-                outbound['options']["bandwidth"]["up"] = config['up']
+                outbound["bandwidth"]["up"] = config['up']
             if config.get('down'):
-                outbound['options']["bandwidth"]["down"] = config['down']
+                outbound["bandwidth"]["down"] = config['down']
         if config.get('obfs'):
-            outbound['options']["obfs"] = {"type": config['obfs']}
+            outbound["obfs"] = {"type": config['obfs']}
+        # Для hysteria2 transport не нужен, он всегда QUIC
 
     else:
         return None
@@ -598,11 +622,13 @@ def check_real(link):
         return (link, False)
     sb_config = create_singbox_config(config_dict)
     if not sb_config:
+        logging.debug(f"Не удалось создать конфиг sing-box для {shorten_link(link)}")
         return (link, False)
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         config_path = f.name
         json.dump(sb_config, f, indent=2)
+        logging.debug(f"Конфиг для {shorten_link(link)} сохранён в {config_path}")
 
     process = None
     try:
@@ -617,6 +643,15 @@ def check_real(link):
         if process.poll() is not None:
             out, err = process.communicate(timeout=1)
             logging.error(f"sing-box завершился с ошибкой для {shorten_link(link)}: {err}")
+            return (link, False)
+
+        # Проверяем, открыт ли порт
+        sock_check = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock_check.settimeout(2)
+        result = sock_check.connect_ex(('127.0.0.1', SOCKS_PORT))
+        sock_check.close()
+        if result != 0:
+            logging.error(f"Порт {SOCKS_PORT} не открыт после запуска sing-box для {shorten_link(link)}")
             return (link, False)
 
         proxies = {
