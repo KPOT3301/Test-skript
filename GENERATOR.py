@@ -2,6 +2,7 @@
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Добавлена TLS-проверка после TCP (многопоточная), реальная проверка через sing-box.
 # Рандомный User-Agent, российские ключи идут первыми в подписке.
+# Добавлено логирование успешных TLS-соединений.
 
 import os
 import re
@@ -696,7 +697,7 @@ def filter_working_links(links):
     if not geo_by_link:
         return []
 
-    # Этап 1.5: Многопоточная TLS-проверка
+    # Этап 1.5: Многопоточная TLS-проверка с логированием успехов
     logging.info(f"🔒 Этап 1.5: TLS-проверка {len(geo_by_link)} ссылок...")
     tls_passed = []
     tls_futures = {}
@@ -712,13 +713,15 @@ def filter_working_links(links):
             else:
                 # Протоколы без TLS сразу добавляем
                 tls_passed.append((link, flag, city, parsed))
+                logging.info(f"TLS не требуется для {shorten_link(link)}")
 
         for future in as_completed(tls_futures):
             link, flag, city, parsed = tls_futures[future]
             if future.result():
                 tls_passed.append((link, flag, city, parsed))
+                logging.info(f"TLS OK для {shorten_link(link)}")
             else:
-                logging.debug(f"TLS failed for {shorten_link(link)}")
+                logging.warning(f"TLS FAILED для {shorten_link(link)}")
 
     logging.info(f"✅ TLS-проверка пройдена: {len(tls_passed)}/{len(geo_by_link)}")
     if not tls_passed:
