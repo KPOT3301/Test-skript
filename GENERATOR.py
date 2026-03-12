@@ -3,14 +3,16 @@
 # Все основные настройки вынесены в начало для удобства.
 # Добавлен случайный выбор User-Agent из списка популярных.
 # Добавлена статистика по источникам: сколько ссылок получено из каждого.
-# Дедупликация по IP выполняется ДО TCP-проверки (остаётся одна ссылка на IP).
+# Дедупликация по IP выполняется ПОСЛЕ TCP-проверки (остаётся сервер с наименьшей задержкой).
 # На этапе TCP-проверки проверяется наличие explicit SNI для всех протоколов, кроме Shadowsocks.
 # Shadowsocks теперь НЕ ОТБРАСЫВАЮТСЯ из-за отсутствия SNI.
 # Замер времени HTTP/HTTPS запросов и отсев медленных.
-# Добавлен тест на джиттер (вариацию задержки).
+# Добавлен тест на джиттер (вариацию задержки) через GET-запросы.
 # ДОБАВЛЕНО: тестирование обхода блокировок (DPI) – проверка доступа к заблокированным ресурсам.
 # ДОБАВЛЕНО: поддержка IPv6 (опционально, если ENABLE_IPV6=True).
 # ДОБАВЛЕНО: динамическая регулировка параллельности (количество потоков подстраивается под число задач).
+# УБРАНО: DNS через DoH (дублировало HTTP/HTTPS тесты).
+# ИЗМЕНЕНО: джиттер теперь использует GET вместо HEAD (для совместимости).
 
 import os
 import re
@@ -123,10 +125,8 @@ MAX_HTTP_LATENCY_MS = 1000        # максимальная задержка HT
 # ---------- Настройки джиттера ----------
 JITTER_ENABLED = True                     # включить проверку джиттера
 JITTER_SAMPLES = 10                        # количество проб для измерения
-JITTER_TARGET_HOST = "www.google.com"      # хост для измерения (должен быть доступен через прокси)
-JITTER_TARGET_PORT = 80                     # порт (80 для HTTP, без TLS)
-MAX_JITTER_MS = 100                         # максимальное среднее абсолютное отклонение (мс)
 JITTER_DELAY_BETWEEN = 0.05                  # задержка между попытками (сек)
+MAX_JITTER_MS = 100                         # максимальное среднее абсолютное отклонение (мс)
 
 # ---------- Тестирование обхода блокировок (DPI) ----------
 DPI_CHECK_ENABLED = True                    # включить проверку обхода блокировок
@@ -156,10 +156,6 @@ TEST_HTTPS_URLS = [
     "https://cloudflare.com/cdn-cgi/trace",
     "https://cp.cloudflare.com/generate_204"
 ]
-
-# ---------- DNS-over-HTTPS проверка ----------
-DOH_URL = "https://1.1.1.1/dns-query?name=google.com&type=A"
-DOH_HEADERS = {"Accept": "application/dns-json"}
 
 # ---------- Диапазон локальных портов для SOCKS (динамическое выделение) ----------
 SOCKS_PORT_START = 10000
@@ -520,7 +516,7 @@ def shorten_link(link):
         return link[:q_pos]
     return link[:80]
 
-# ---------- ПОЛУЧЕНИЕ IP ДЛЯ ДЕДУПЛИКАЦИИ (без TCP-соединения) ----------
+# ---------- ПОЛУЧЕНИЕ IP ДЛЯ ДЕДУПЛИКАЦИИ (используется только для сбора статистики, не для отсева) ----------
 def resolve_ip_for_link(link):
     """Быстрое разрешение домена в IP (без проверки порта). Возвращает (link, ip) или (link, None) при ошибке."""
     parsed = parse_link(link)
@@ -529,24 +525,6 @@ def resolve_ip_for_link(link):
     host = parsed['host']
     ip = resolve_host(host)
     return link, ip
-
-def deduplicate_by_ip_before_tcp(links):
-    """Дедупликация по IP до TCP-проверки: оставляем только одну ссылку на каждый IP (первую попавшуюся)."""
-    ip_to_link = {}
-    resolved_count = 0
-    # Адаптивное количество потоков
-    workers = min(TCP_MAX_WORKERS, len(links))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_link = {executor.submit(resolve_ip_for_link, link): link for link in links}
-        for future in as_completed(future_to_link):
-            link, ip = future.result()
-            if ip:
-                resolved_count += 1
-                if ip not in ip_to_link:
-                    ip_to_link[ip] = link
-    unique_links = list(ip_to_link.values())
-    logging.info(f"🔍 Разрешено IP: {resolved_count} из {len(links)} ссылок. Уникальных IP: {len(unique_links)}")
-    return unique_links
 
 # ---------- СОЗДАНИЕ КОНФИГА XRAY ----------
 def create_xray_config(config, socks_port):
@@ -736,24 +714,25 @@ def check_tcp(link):
     except:
         return (link, False, None, None)
 
-# ---------- ИЗМЕРЕНИЕ ДЖИТТЕРА ----------
+# ---------- ИЗМЕРЕНИЕ ДЖИТТЕРА (через GET-запросы) ----------
 def measure_jitter(proxies):
     """
-    Измеряет джиттер через серию TCP-соединений через SOCKS5 прокси.
+    Измеряет джиттер через серию GET-запросов к тестовому HTTP-URL через SOCKS5 прокси.
     Возвращает (успех, среднее, джиттер) или (False, None, None) при ошибке.
     Джиттер вычисляется как среднее абсолютное отклонение от среднего.
     """
     latencies = []
-    target_url = f"http://{JITTER_TARGET_HOST}:{JITTER_TARGET_PORT}/"
+    # Используем первый тестовый HTTP URL для измерения джиттера
+    target_url = TEST_HTTP_URLS[0]
     for i in range(JITTER_SAMPLES):
         try:
             start = time.time()
-            # Используем HEAD-запрос для минимизации времени передачи данных
-            resp = requests.head(
+            resp = requests.get(
                 target_url,
                 proxies=proxies,
                 timeout=REAL_CHECK_TIMEOUT,
-                headers={'User-Agent': random.choice(USER_AGENTS)}
+                headers={'User-Agent': random.choice(USER_AGENTS)},
+                allow_redirects=False
             )
             latency = int((time.time() - start) * 1000)
             latencies.append(latency)
@@ -884,22 +863,6 @@ def check_real(link):
                 if not https_ok:
                     return False
 
-            # DNS через DoH
-            try:
-                start = time.time()
-                resp = requests.get(
-                    DOH_URL, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                    headers={'User-Agent': random.choice(USER_AGENTS), **DOH_HEADERS}, verify=False
-                )
-                latency = int((time.time() - start) * 1000)
-                if latency > MAX_HTTP_LATENCY_MS:
-                    return False
-                data = resp.json()
-                if 'Answer' not in data or len(data['Answer']) == 0:
-                    return False
-            except Exception:
-                return False
-
             # Проверка джиттера (если включена)
             if JITTER_ENABLED:
                 jitter_ok, avg_jitter, jitter_val = measure_jitter(proxies)
@@ -947,27 +910,39 @@ def filter_working_links(links):
     # Адаптивное количество потоков для TCP
     tcp_workers = min(TCP_MAX_WORKERS, total_checks)
     # Этап 1: TCP
-    tcp_success = []  # (link, ip, latency)
+    tcp_results = []  # (link, ip, latency)
     with ThreadPoolExecutor(max_workers=tcp_workers) as executor:
         future_to_link = {executor.submit(check_tcp, link): link for link in links}
         for future in as_completed(future_to_link):
             current_check += 1
             link, ok, ip, latency = future.result()
             if ok:
-                tcp_success.append((link, ip, latency))
+                tcp_results.append((link, ip, latency))
 
-    logging.info(f"📊 TCP-проверка завершена. Прошли: {len(tcp_success)}/{total_checks}")
+    logging.info(f"📊 TCP-проверка завершена. Прошли: {len(tcp_results)}/{total_checks}")
 
-    if not tcp_success:
+    if not tcp_results:
         return []
 
-    # Геоданные – добавляем все серверы, прошедшие TCP
-    candidates = []  # (link, flag, city, country_code, latency, ip)
-    for link, ip, latency in tcp_success:
-        flag, city, country_code = get_geo_info(ip) if ip else ("", "", "")
-        candidates.append((link, flag, city, country_code, latency, ip))
+    # ----- ДЕДУПЛИКАЦИЯ ПО IP ПОСЛЕ TCP (оставляем сервер с наименьшей задержкой) -----
+    best_by_ip = {}
+    for link, ip, latency in tcp_results:
+        if ip not in best_by_ip or latency < best_by_ip[ip][1]:
+            best_by_ip[ip] = (link, latency)
+    deduplicated_links = [best_by_ip[ip][0] for ip in best_by_ip]
+    removed = len(tcp_results) - len(deduplicated_links)
+    if removed > 0:
+        logging.info(f"🗑 Удалено дубликатов по IP после TCP: {removed}")
 
-    logging.info(f"🧾 Серверов с геоданными: {len(candidates)}")
+    # Собираем геоданные для прошедших дедупликацию
+    candidates = []  # (link, flag, city, country_code, latency, ip)
+    for link, ip, latency in tcp_results:
+        # Ищем запись в best_by_ip, чтобы убедиться, что эта ссылка осталась
+        if best_by_ip[ip][0] == link:
+            flag, city, country_code = get_geo_info(ip) if ip else ("", "", "")
+            candidates.append((link, flag, city, country_code, latency, ip))
+
+    logging.info(f"🧾 Серверов с геоданными после дедупликации: {len(candidates)}")
 
     if not candidates:
         return []
@@ -1059,15 +1034,13 @@ def main():
     if not all_links:
         return
 
-    # Дедупликация по IP до TCP-проверки
-    unique_links = deduplicate_by_ip_before_tcp(all_links)
-    logging.info(f"🗑 После дедупликации по IP осталось {len(unique_links)} ссылок (из {len(all_links)})")
-
+    # Старая дедупликация по IP до TCP удалена, теперь она будет после TCP
+    # Просто передаём все ссылки в фильтрацию
     record_counter = 0
     current_check = 0
-    total_checks = len(unique_links)
+    total_checks = len(all_links)
 
-    working_links_with_geo = filter_working_links(unique_links)
+    working_links_with_geo = filter_working_links(all_links)
 
     # Разделяем на российские и остальные
     rus_links = [item for item in working_links_with_geo if item[3] == 'RU']
