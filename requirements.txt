@@ -1,4 +1,2 @@
 requests
-pysocks
 geoip2
-tzdata
