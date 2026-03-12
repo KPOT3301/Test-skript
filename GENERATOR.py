@@ -2,7 +2,7 @@
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Добавлена TLS-проверка после TCP (многопоточная), реальная проверка через sing-box.
 # Рандомный User-Agent, российские ключи идут первыми в подписке.
-# Добавлено логирование успешных TLS-соединений.
+# Логирование успешных TLS-соединений, увеличенные таймауты, резервный URL, чтение stderr sing-box.
 
 import os
 import re
@@ -91,16 +91,18 @@ TCP_MAX_WORKERS = 400
 
 # TLS-проверка
 TLS_CHECK_TIMEOUT = 5
-TLS_MAX_WORKERS = 100  # отдельный пул для TLS
+TLS_MAX_WORKERS = 100
 
-# Реальная проверка
+# Реальная проверка (увеличенные таймауты)
 SOCKS_PORT = 1080
-REAL_CHECK_TIMEOUT = 15
+REAL_CHECK_TIMEOUT = 20           # увеличен с 15 до 20
 REAL_CHECK_CONCURRENCY = 30
-SING_BOX_STARTUP_DELAY = 1
+SING_BOX_STARTUP_DELAY = 3        # увеличен с 1 до 3
 
+# Тестовые URL (добавлен резервный)
 TEST_URLS = [
-    "http://connectivitycheck.gstatic.com/generate_204"
+    "http://connectivitycheck.gstatic.com/generate_204",
+    "http://www.gstatic.com/generate_204"
 ]
 
 MAX_LATENCY_MS = 300
@@ -589,7 +591,7 @@ def check_tcp(link):
     except:
         return (link, False, None, None)
 
-# ---------- РЕАЛЬНАЯ ПРОВЕРКА ----------
+# ---------- РЕАЛЬНАЯ ПРОВЕРКА (с логированием ошибок sing-box) ----------
 def check_real(link):
     config_dict = parse_link(link)
     if not config_dict:
@@ -604,11 +606,19 @@ def check_real(link):
 
     process = None
     try:
+        logging.debug(f"Запуск sing-box для {shorten_link(link)}")
         process = subprocess.Popen(
             [SING_BOX_PATH, 'run', '-c', config_path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         time.sleep(SING_BOX_STARTUP_DELAY)
+
+        # Проверяем, не упал ли процесс сразу
+        if process.poll() is not None:
+            out, err = process.communicate(timeout=1)
+            logging.error(f"sing-box завершился с ошибкой для {shorten_link(link)}: {err}")
+            return (link, False)
+
         proxies = {
             'http': f'socks5h://127.0.0.1:{SOCKS_PORT}',
             'https': f'socks5h://127.0.0.1:{SOCKS_PORT}'
@@ -628,24 +638,31 @@ def check_real(link):
         http_success = False
         for test_url in TEST_URLS:
             try:
+                logging.debug(f"Тестируем HTTP {test_url} для {shorten_link(link)}")
                 resp = requests.get(
                     test_url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
                     headers={'User-Agent': get_random_ua()}, allow_redirects=False
                 )
                 http_success = True
+                logging.debug(f"HTTP OK для {shorten_link(link)}")
                 break
-            except Exception:
+            except Exception as e:
+                logging.debug(f"HTTP ошибка для {shorten_link(link)}: {e}")
                 continue
 
         if not http_success:
+            logging.debug(f"HTTP не удался для {shorten_link(link)}")
             return (link, False)
 
         if needs_https:
             try:
                 https_test = "https://www.google.com/generate_204"
+                logging.debug(f"Тестируем HTTPS для {shorten_link(link)}")
                 requests.get(https_test, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
                              headers={'User-Agent': get_random_ua()}, verify=False)
-            except Exception:
+                logging.debug(f"HTTPS OK для {shorten_link(link)}")
+            except Exception as e:
+                logging.debug(f"HTTPS ошибка для {shorten_link(link)}: {e}")
                 return (link, False)
 
         return (link, True)
@@ -711,7 +728,6 @@ def filter_working_links(links):
                 future = executor.submit(check_tls, host, port, sni)
                 tls_futures[future] = (link, flag, city, parsed)
             else:
-                # Протоколы без TLS сразу добавляем
                 tls_passed.append((link, flag, city, parsed))
                 logging.info(f"TLS не требуется для {shorten_link(link)}")
 
@@ -826,7 +842,7 @@ def check_singbox_available():
 # ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, TLS=5с, реальная=15с, отсев по TCP latency >300 мс, все проверки однократные)")
+    logging.info("🟢 Запуск генератора подписок (протоколы: Vless, SS, Trojan, VMess, Hysteria2; таймауты: TCP=10с, TLS=5с, реальная=20с, отсев по TCP latency >300 мс, все проверки однократные)")
     if not check_singbox_available():
         logging.error("sing-box обязателен. Завершение.")
         return
