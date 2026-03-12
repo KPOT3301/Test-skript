@@ -2,10 +2,13 @@
 """
 VPN Key Checker — параллельный режим для GitHub Actions
 
-Режимы запуска:
-  python GENERATOR.py prepare          — скачать ключи, дедублировать, разбить на чанки
-  python GENERATOR.py check <index>    — проверить чанк с индексом (0..N-1)
-  python GENERATOR.py merge            — собрать результаты и сохранить subscription
+Цепочка проверок:
+  TCP → TLS → sing-box запуск → curl --socks5 (проверка реального трафика)
+
+Режимы:
+  python GENERATOR.py prepare       — скачать, дедублировать, разбить на чанки
+  python GENERATOR.py check <index> — проверить чанк
+  python GENERATOR.py merge         — собрать результаты
 """
 
 import asyncio, base64, json, os, random, socket, ssl
@@ -15,7 +18,6 @@ from pathlib import Path
 from typing import Optional
 
 import aiohttp
-from aiohttp_socks import ProxyConnector
 
 
 # ══════════════════════════════════════════════════════════════
@@ -29,11 +31,11 @@ CHUNKS_DIR         = "chunks"
 RESULTS_DIR        = "results"
 SINGBOX_PATH       = "sing-box"
 TEST_URL           = "http://cp.cloudflare.com/generate_204"
-TEST_TIMEOUT       = 10
+TEST_TIMEOUT       = 10    # секунд на curl запрос
 TCP_TIMEOUT        = 5
 TLS_TIMEOUT        = 5
+SINGBOX_STARTUP    = 2.0   # секунд ждать запуска sing-box
 MAX_CONCURRENT     = 10
-SINGBOX_STARTUP    = 1.5
 NUM_WORKERS        = 20
 
 SEP = "-" * 62
@@ -43,15 +45,15 @@ SEP = "-" * 62
 #  Цвета / лог
 # ══════════════════════════════════════════════════════════════
 
-RST  = "\033[0m"
-BOLD = "\033[1m"
-DIM  = "\033[2m"
-RED  = "\033[31m"
-GRN  = "\033[32m"
-YLW  = "\033[33m"
-CYN  = "\033[36m"
-MGT  = "\033[35m"
-BLU  = "\033[34m"
+RST    = "\033[0m"
+BOLD   = "\033[1m"
+DIM    = "\033[2m"
+RED    = "\033[31m"
+GRN    = "\033[32m"
+YLW    = "\033[33m"
+CYN    = "\033[36m"
+MGT    = "\033[35m"
+BLU    = "\033[34m"
 BG_GRN = "\033[42m"
 BLK    = "\033[30m"
 
@@ -93,14 +95,13 @@ REASON_ICON = {
     "tcp":           "\U0001f50c",
     "tls":           "\U0001f512",
     "singbox-crash": "\U0001f4a5",
-    "singbox-error": "\u2757",
-    "http":          "\U0001f310",
+    "curl-fail":     "\U0001f310",
     "ok":            "\u2705",
 }
 
 
 # ══════════════════════════════════════════════════════════════
-#  Парсеры протоколов
+#  Парсеры протоколов → sing-box outbound конфиги
 # ══════════════════════════════════════════════════════════════
 
 def _strip_fragment(uri): return uri.split("#")[0].strip()
@@ -120,15 +121,22 @@ def parse_vless(uri):
         if sec in ("tls", "reality"):
             tls = {"enabled": True, "server_name": p.get("sni", [host])[0], "insecure": True}
             if sec == "reality":
-                tls["reality"] = {"enabled": True, "public_key": p.get("pbk",[""])[0], "short_id": p.get("sid",[""])[0]}
+                tls["reality"] = {"enabled": True,
+                                  "public_key": p.get("pbk", [""])[0],
+                                  "short_id":   p.get("sid", [""])[0]}
             ob["tls"] = tls
         net = p.get("type", ["tcp"])[0]
         if net == "ws":
-            ob["transport"] = {"type":"ws","path":p.get("path",["/"])[0],"headers":{"Host":p.get("host",[host])[0]}}
+            ob["transport"] = {"type": "ws",
+                               "path": p.get("path", ["/"])[0],
+                               "headers": {"Host": p.get("host", [host])[0]}}
         elif net == "grpc":
-            ob["transport"] = {"type":"grpc","service_name":p.get("serviceName",[""])[0]}
-        elif net in ("h2","http"):
-            ob["transport"] = {"type":"http","host":[p.get("host",[host])[0]],"path":p.get("path",["/"])[0]}
+            ob["transport"] = {"type": "grpc",
+                               "service_name": p.get("serviceName", [""])[0]}
+        elif net in ("h2", "http"):
+            ob["transport"] = {"type": "http",
+                               "host": [p.get("host", [host])[0]],
+                               "path": p.get("path", ["/"])[0]}
         return ob
     except Exception: return None
 
@@ -139,17 +147,21 @@ def parse_vmess(uri):
         data = json.loads(base64.b64decode(encoded).decode())
         host, port, uuid = data.get("add",""), int(data.get("port",0)), data.get("id","")
         if not all([host, port, uuid]): return None
-        ob = {"type":"vmess","server":host,"server_port":port,"uuid":uuid,
-              "security":data.get("scy","auto"),"alter_id":int(data.get("aid",0))}
+        ob = {"type": "vmess", "server": host, "server_port": port, "uuid": uuid,
+              "security": data.get("scy", "auto"), "alter_id": int(data.get("aid", 0))}
         if data.get("tls") == "tls":
-            ob["tls"] = {"enabled":True,"server_name":data.get("sni",host),"insecure":True}
-        net = data.get("net","tcp")
+            ob["tls"] = {"enabled": True, "server_name": data.get("sni", host), "insecure": True}
+        net = data.get("net", "tcp")
         if net == "ws":
-            ob["transport"] = {"type":"ws","path":data.get("path","/"),"headers":{"Host":data.get("host",host)}}
+            ob["transport"] = {"type": "ws",
+                               "path": data.get("path", "/"),
+                               "headers": {"Host": data.get("host", host)}}
         elif net == "grpc":
-            ob["transport"] = {"type":"grpc","service_name":data.get("path","")}
-        elif net in ("h2","http"):
-            ob["transport"] = {"type":"http","host":[data.get("host",host)],"path":data.get("path","/")}
+            ob["transport"] = {"type": "grpc", "service_name": data.get("path", "")}
+        elif net in ("h2", "http"):
+            ob["transport"] = {"type": "http",
+                               "host": [data.get("host", host)],
+                               "path": data.get("path", "/")}
         return ob
     except Exception: return None
 
@@ -161,16 +173,22 @@ def parse_trojan(uri):
         pwd, host, port = parsed.username, parsed.hostname, parsed.port
         p = urllib.parse.parse_qs(parsed.query)
         if not all([pwd, host, port]): return None
-        sec = p.get("security",["tls"])[0]
-        tls = {"enabled":True,"server_name":p.get("sni",[host])[0],"insecure":True}
+        sec = p.get("security", ["tls"])[0]
+        tls = {"enabled": True, "server_name": p.get("sni", [host])[0], "insecure": True}
         if sec == "reality":
-            tls["reality"] = {"enabled":True,"public_key":p.get("pbk",[""])[0],"short_id":p.get("sid",[""])[0]}
-        ob = {"type":"trojan","server":host,"server_port":int(port),"password":pwd,"tls":tls}
-        net = p.get("type",["tcp"])[0]
+            tls["reality"] = {"enabled": True,
+                              "public_key": p.get("pbk", [""])[0],
+                              "short_id":   p.get("sid", [""])[0]}
+        ob = {"type": "trojan", "server": host, "server_port": int(port),
+              "password": pwd, "tls": tls}
+        net = p.get("type", ["tcp"])[0]
         if net == "ws":
-            ob["transport"] = {"type":"ws","path":p.get("path",["/"])[0],"headers":{"Host":p.get("host",[host])[0]}}
+            ob["transport"] = {"type": "ws",
+                               "path": p.get("path", ["/"])[0],
+                               "headers": {"Host": p.get("host", [host])[0]}}
         elif net == "grpc":
-            ob["transport"] = {"type":"grpc","service_name":p.get("serviceName",[""])[0]}
+            ob["transport"] = {"type": "grpc",
+                               "service_name": p.get("serviceName", [""])[0]}
         return ob
     except Exception: return None
 
@@ -194,7 +212,8 @@ def parse_ss(uri):
         host, port_str = server_part.rsplit(":", 1)
         port = int(port_str)
         if not all([method, password, host, port]): return None
-        return {"type":"shadowsocks","server":host,"server_port":port,"method":method,"password":password}
+        return {"type": "shadowsocks", "server": host, "server_port": port,
+                "method": method, "password": password}
     except Exception: return None
 
 
@@ -207,6 +226,155 @@ def parse_key(uri):
     return None
 
 def key_fingerprint(uri): return _strip_fragment(uri).lower()
+
+def _get_host_port_sni(uri):
+    uri_clean = _strip_fragment(uri)
+    parsed = urllib.parse.urlparse(uri_clean)
+    host, port = parsed.hostname or "", parsed.port or 443
+    p = urllib.parse.parse_qs(parsed.query)
+    if uri.startswith("vmess://"):
+        try:
+            encoded = uri[8:] + "=" * (-len(uri[8:]) % 4)
+            data = json.loads(base64.b64decode(encoded).decode())
+            host = data.get("add", host)
+            port = int(data.get("port", port))
+            sni  = data.get("sni", host)
+            return host, port, sni if data.get("tls") == "tls" else None
+        except Exception: return host, port, None
+    sni     = p.get("sni", [host])[0]
+    has_tls = p.get("security", ["none"])[0] in ("tls", "reality") or uri.startswith("trojan://")
+    return host, port, (sni if has_tls else None)
+
+
+# ══════════════════════════════════════════════════════════════
+#  TCP / TLS проверки
+# ══════════════════════════════════════════════════════════════
+
+async def check_tcp(host, port):
+    try:
+        loop = asyncio.get_event_loop()
+        conn = await asyncio.wait_for(
+            loop.run_in_executor(None,
+                lambda: socket.create_connection((host, port), timeout=TCP_TIMEOUT)),
+            timeout=TCP_TIMEOUT + 1)
+        conn.close()
+        return True
+    except Exception: return False
+
+
+async def check_tls(host, port, sni):
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        loop = asyncio.get_event_loop()
+        def _hs():
+            raw = socket.create_connection((host, port), timeout=TLS_TIMEOUT)
+            ctx.wrap_socket(raw, server_hostname=sni).close()
+        await asyncio.wait_for(loop.run_in_executor(None, _hs), timeout=TLS_TIMEOUT + 1)
+        return True
+    except Exception: return False
+
+
+# ══════════════════════════════════════════════════════════════
+#  sing-box + curl проверка
+# ══════════════════════════════════════════════════════════════
+
+def build_singbox_config(outbound, socks_port):
+    return {
+        "log": {"level": "fatal"},
+        "dns": {"servers": [{"tag": "dns", "address": "8.8.8.8"}]},
+        "inbounds": [{"type": "socks", "tag": "socks-in",
+                      "listen": "127.0.0.1", "listen_port": socks_port}],
+        "outbounds": [{**outbound, "tag": "proxy"},
+                      {"type": "direct", "tag": "direct"}],
+        "route": {"final": "proxy"},
+    }
+
+
+async def test_via_curl(socks_port: int) -> bool:
+    """Проверяем трафик через curl --socks5 — именно так работало раньше."""
+    try:
+        loop = asyncio.get_event_loop()
+        def _curl():
+            result = subprocess.run(
+                [
+                    "curl",
+                    "--socks5", f"127.0.0.1:{socks_port}",
+                    "--max-time", str(TEST_TIMEOUT),
+                    "--silent",
+                    "--output", "/dev/null",
+                    "--write-out", "%{http_code}",
+                    "--connect-timeout", "5",
+                    TEST_URL,
+                ],
+                capture_output=True,
+                timeout=TEST_TIMEOUT + 3,
+            )
+            code = result.stdout.decode().strip()
+            return code in ("200", "204")
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _curl),
+            timeout=TEST_TIMEOUT + 5)
+    except Exception:
+        return False
+
+
+async def test_key(uri, semaphore):
+    """TCP → TLS → sing-box → curl --socks5"""
+    t0 = time.time()
+    async with semaphore:
+        outbound = parse_key(uri)
+        if outbound is None:
+            return uri, False, "parse", (time.time()-t0)*1000
+
+        host, port, sni = _get_host_port_sni(uri)
+        if not host or not port:
+            return uri, False, "parse", (time.time()-t0)*1000
+
+        # ── 1. TCP ────────────────────────────────────────────
+        if not await check_tcp(host, port):
+            return uri, False, "tcp", (time.time()-t0)*1000
+
+        # ── 2. TLS ────────────────────────────────────────────
+        if sni and not await check_tls(host, port, sni):
+            return uri, False, "tls", (time.time()-t0)*1000
+
+        # ── 3. sing-box + curl ────────────────────────────────
+        socks_port  = random.randint(20000, 59999)
+        config_file = None
+        process     = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                json.dump(build_singbox_config(outbound, socks_port), f)
+                config_file = f.name
+
+            process = subprocess.Popen(
+                [SINGBOX_PATH, "run", "-c", config_file],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            await asyncio.sleep(SINGBOX_STARTUP)
+
+            if process.poll() is not None:
+                return uri, False, "singbox-crash", (time.time()-t0)*1000
+
+            # curl вместо aiohttp_socks
+            ok = await test_via_curl(socks_port)
+            return uri, ok, ("ok" if ok else "curl-fail"), (time.time()-t0)*1000
+
+        except Exception:
+            return uri, False, "singbox-crash", (time.time()-t0)*1000
+        finally:
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(None, process.wait),
+                        timeout=3)
+                except Exception: process.kill()
+            if config_file:
+                try: os.unlink(config_file)
+                except OSError: pass
 
 
 # ══════════════════════════════════════════════════════════════
@@ -234,117 +402,6 @@ async def fetch_subscription(url, session):
         short = (url[:55]+"...") if len(url)>56 else url
         log_err(f"Ошибка  {DIM}{short}{RST}  {RED}{e}{RST}")
     return keys
-
-
-# ══════════════════════════════════════════════════════════════
-#  TCP / TLS
-# ══════════════════════════════════════════════════════════════
-
-def _get_host_port_sni(uri):
-    uri_clean = _strip_fragment(uri)
-    parsed = urllib.parse.urlparse(uri_clean)
-    host, port = parsed.hostname or "", parsed.port or 443
-    p = urllib.parse.parse_qs(parsed.query)
-    if uri.startswith("vmess://"):
-        try:
-            encoded = uri[8:] + "=" * (-len(uri[8:]) % 4)
-            data = json.loads(base64.b64decode(encoded).decode())
-            host = data.get("add", host)
-            port = int(data.get("port", port))
-            sni  = data.get("sni", host)
-            return host, port, sni if data.get("tls") == "tls" else None
-        except Exception: return host, port, None
-    sni     = p.get("sni", [host])[0]
-    has_tls = p.get("security",["none"])[0] in ("tls","reality") or uri.startswith("trojan://")
-    return host, port, (sni if has_tls else None)
-
-
-async def check_tcp(host, port):
-    try:
-        loop = asyncio.get_event_loop()
-        conn = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: socket.create_connection((host, port), timeout=TCP_TIMEOUT)),
-            timeout=TCP_TIMEOUT + 1)
-        conn.close()
-        return True
-    except Exception: return False
-
-
-async def check_tls(host, port, sni):
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        loop = asyncio.get_event_loop()
-        def _hs():
-            raw = socket.create_connection((host, port), timeout=TLS_TIMEOUT)
-            ctx.wrap_socket(raw, server_hostname=sni).close()
-        await asyncio.wait_for(loop.run_in_executor(None, _hs), timeout=TLS_TIMEOUT + 1)
-        return True
-    except Exception: return False
-
-
-# ══════════════════════════════════════════════════════════════
-#  sing-box
-# ══════════════════════════════════════════════════════════════
-
-def build_singbox_config(outbound, socks_port):
-    return {
-        "log": {"level": "fatal"},
-        "dns": {"servers": [{"tag": "dns", "address": "8.8.8.8"}]},
-        "inbounds": [{"type":"socks","tag":"socks-in","listen":"127.0.0.1","listen_port":socks_port}],
-        "outbounds": [{**outbound, "tag":"proxy"}, {"type":"direct","tag":"direct"}],
-        "route": {"final": "proxy"},
-    }
-
-
-async def test_key(uri, semaphore):
-    t0 = time.time()
-    async with semaphore:
-        outbound = parse_key(uri)
-        if outbound is None:
-            return uri, False, "parse", (time.time()-t0)*1000
-
-        host, port, sni = _get_host_port_sni(uri)
-        if not host or not port:
-            return uri, False, "parse", (time.time()-t0)*1000
-
-        if not await check_tcp(host, port):
-            return uri, False, "tcp", (time.time()-t0)*1000
-
-        if sni and not await check_tls(host, port, sni):
-            return uri, False, "tls", (time.time()-t0)*1000
-
-        socks_port  = random.randint(20000, 59999)
-        config_file = None
-        process     = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-                json.dump(build_singbox_config(outbound, socks_port), f)
-                config_file = f.name
-            process = subprocess.Popen(
-                [SINGBOX_PATH, "run", "-c", config_file],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            await asyncio.sleep(SINGBOX_STARTUP)
-            if process.poll() is not None:
-                return uri, False, "singbox-crash", (time.time()-t0)*1000
-            connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{socks_port}")
-            async with aiohttp.ClientSession(connector=connector) as sess:
-                async with sess.get(TEST_URL, timeout=aiohttp.ClientTimeout(total=TEST_TIMEOUT), allow_redirects=True) as resp:
-                    ok = resp.status in (200, 204)
-                    return uri, ok, ("ok" if ok else "http"), (time.time()-t0)*1000
-        except Exception:
-            return uri, False, "singbox-error", (time.time()-t0)*1000
-        finally:
-            if process and process.poll() is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(
-                        asyncio.get_event_loop().run_in_executor(None, process.wait), timeout=3)
-                except Exception: process.kill()
-            if config_file:
-                try: os.unlink(config_file)
-                except OSError: pass
 
 
 # ══════════════════════════════════════════════════════════════
@@ -430,7 +487,8 @@ async def mode_check(chunk_index: int):
         log_warn("sing-box не найден!")
 
     section(f"ПРОВЕРКА  {len(keys)} ключей  |  параллельно: {MAX_CONCURRENT}")
-    log_info(f"Таймауты: TCP {CYN}{TCP_TIMEOUT}с{RST}  TLS {CYN}{TLS_TIMEOUT}с{RST}  HTTP {CYN}{TEST_TIMEOUT}с{RST}")
+    log_info(f"Метод: {BOLD}sing-box + curl --socks5{RST}")
+    log_info(f"Таймауты: TCP {CYN}{TCP_TIMEOUT}с{RST}  TLS {CYN}{TLS_TIMEOUT}с{RST}  curl {CYN}{TEST_TIMEOUT}с{RST}")
     print()
 
     working = []
@@ -451,30 +509,27 @@ async def mode_check(chunk_index: int):
             rl       = REASON_ICON.get(reason, "·")
 
             if ok:
-                # ═══ РАБОЧИЙ КЛЮЧ — максимально заметная строка ═══
                 working.append(uri)
                 short_uri = (uri[:78]+"...") if len(uri)>79 else uri
                 print(f"\n  {BG_GRN}{BLK}{BOLD} \u2705 WORKING #{len(working)} {RST}  {proto}  {GRN}{BOLD}{host_str}{RST}  {DIM}{elapsed_ms:.0f}ms{RST}")
                 print(f"  {GRN}{SEP}{RST}")
                 print(f"  {GRN}{BOLD}{short_uri}{RST}\n")
             else:
-                # --- нерабочий — тусклая строка, не отвлекает -------
                 print(f"  {DIM}\u2718 {proto} | {bar}  |  {host_str}  {rl}  {elapsed_ms:>6.0f}ms{RST}")
     else:
-        log_warn("sing-box недоступен — сохраняем чанк без проверки.")
-        working = keys
+        log_warn("sing-box недоступен — пропускаем чанк.")
 
     section(f"ИТОГ чанка #{chunk_index:02d}")
     log_ok  (f"Рабочих       : {GRN}{BOLD}{len(working)}{RST}")
     log_info(f"TCP закрыт    : {YLW}{stats.get('tcp',0)}{RST}")
     log_info(f"TLS провален  : {YLW}{stats.get('tls',0)}{RST}")
-    log_info(f"HTTP/прочее   : {RED}{stats.get('http',0)+stats.get('singbox-crash',0)+stats.get('singbox-error',0)}{RST}")
+    log_info(f"curl провален : {RED}{stats.get('curl-fail',0)}{RST}")
+    log_info(f"sb crash      : {RED}{stats.get('singbox-crash',0)}{RST}")
 
     Path(RESULTS_DIR).mkdir(exist_ok=True)
     result_file = Path(RESULTS_DIR) / f"result_{chunk_index:02d}.txt"
     result_file.write_text("\n".join(working))
     log_ok(f"Сохранено -> {BOLD}{result_file}{RST}")
-
     print(f"\n{CYN}{'='*W}{RST}\n")
 
 
@@ -504,10 +559,7 @@ def mode_merge():
             seen.add(fp); unique.append(k)
 
     section("ИТОГ")
-    log_info(f"Всего рабочих  : {BOLD}{len(all_working)}{RST}")
-    if len(all_working) != len(unique):
-        log_info(f"Доп. дублей    : {YLW}{len(all_working)-len(unique)}{RST}")
-    log_ok(f"Финальных      : {GRN}{BOLD}{len(unique)}{RST}")
+    log_ok(f"Финальных ключей : {GRN}{BOLD}{len(unique)}{RST}")
 
     section("СОХРАНЕНИЕ")
     content = "\n".join(unique)
