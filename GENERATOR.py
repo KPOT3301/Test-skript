@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Финальная версия с групповым логированием.
 # Проверка реальных сайтов: только Google (https://www.google.com/generate_204).
+# Все настройки вынесены в начало для удобства редактирования.
 
 import os
 import re
@@ -19,6 +20,57 @@ from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from datetime import datetime
+
+# =============================================================================
+# НАСТРОЙКИ (можно изменять)
+# =============================================================================
+
+# ---------- Общие настройки ----------
+SOURCES_FILE = "sources.txt"                # файл со списком источников
+OUTPUT_FILE = "subscription.txt"             # выходной файл подписки
+OUTPUT_BASE64_FILE = "subscription_base64.txt" # base64-версия
+REQUEST_TIMEOUT = 10                         # таймаут для загрузки источников
+SING_BOX_PATH = "./sing-box"                  # путь к исполняемому файлу sing-box
+
+# ---------- Настройки подписки ----------
+PROFILE_TITLE = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
+SUPPORT_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
+PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
+PROFILE_UPDATE_INTERVAL = "1"
+SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
+
+# ---------- Геоданные ----------
+GEOIP_DB_PATH = "GeoLite2-City.mmdb"
+GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
+
+# ---------- TCP-проверка ----------
+TCP_CHECK_TIMEOUT = 10        # таймаут TCP-соединения (сек)
+TCP_MAX_WORKERS = 400         # количество потоков для TCP-проверки
+MAX_LATENCY_MS = 200          # максимальная допустимая задержка (мс)
+
+# ---------- TLS-проверка ----------
+TLS_CHECK_TIMEOUT = 5         # таймаут TLS-рукопожатия (сек)
+TLS_MAX_WORKERS = 100         # количество потоков для TLS-проверки
+
+# ---------- Реальная проверка через sing-box ----------
+SOCKS_BASE_PORT = 10000       # начальный порт для динамического выделения
+SOCKS_PORT_RANGE = 1000       # диапазон портов
+REAL_CHECK_TIMEOUT = 30        # общий таймаут для HTTP/HTTPS запросов (сек)
+REAL_CHECK_CONCURRENCY = 30    # количество параллельных проверок
+SING_BOX_STARTUP_DELAY = 5     # задержка после запуска sing-box (сек)
+
+# ---------- Тестовые URL ----------
+FAST_TEST_URLS = [             # быстрые URL (должен открыться хотя бы один)
+    "http://connectivitycheck.gstatic.com/generate_204",
+    "http://www.gstatic.com/generate_204"
+]
+REAL_SITES = [                  # реальные сайты (должен открыться Google)
+    "https://www.google.com/generate_204"
+]
+
+# =============================================================================
+# КОНЕЦ НАСТРОЕК
+# =============================================================================
 
 # ---------- НАСТРОЙКА ЛОГИРОВАНИЯ ----------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -72,48 +124,6 @@ except ImportError:
     GEOIP_AVAILABLE = False
     logging.warning("⚠️ geoip2 не установлена. Флаги стран и города не будут добавлены.")
 
-# ---------- КОНСТАНТЫ ПОДПИСКИ ----------
-PROFILE_TITLE = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
-SUPPORT_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
-PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовыеТОННЕЛИ🇷🇺"
-PROFILE_UPDATE_INTERVAL = "1"
-SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
-
-# ---------- ОСНОВНЫЕ КОНСТАНТЫ ----------
-SOURCES_FILE = "sources.txt"
-OUTPUT_FILE = "subscription.txt"
-OUTPUT_BASE64_FILE = "subscription_base64.txt"
-REQUEST_TIMEOUT = 10
-SING_BOX_PATH = "./sing-box"
-
-# TCP
-TCP_CHECK_TIMEOUT = 10
-TCP_MAX_WORKERS = 400
-
-# TLS
-TLS_CHECK_TIMEOUT = 5
-TLS_MAX_WORKERS = 100
-
-# Реальная проверка
-SOCKS_BASE_PORT = 10000
-SOCKS_PORT_RANGE = 1000
-REAL_CHECK_TIMEOUT = 30
-REAL_CHECK_CONCURRENCY = 30
-SING_BOX_STARTUP_DELAY = 5
-
-# Быстрые тестовые URL (хотя бы один должен быть доступен)
-FAST_TEST_URLS = [
-    "http://connectivitycheck.gstatic.com/generate_204",
-    "http://www.gstatic.com/generate_204"
-]
-
-# Реальные сайты – теперь только Google
-REAL_SITES = [
-    "https://www.google.com/generate_204"
-]
-
-MAX_LATENCY_MS = 300
-
 # ---------- ДИНАМИЧЕСКИЕ ПОРТЫ ----------
 _port_counter = 0
 _port_lock = threading.Lock()
@@ -126,9 +136,6 @@ def get_next_port():
         return port
 
 # ---------- GEOIP ЗАГРУЗКА ----------
-GEOIP_DB_PATH = "GeoLite2-City.mmdb"
-GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
-
 def ensure_geoip_db():
     if not GEOIP_AVAILABLE:
         return False
@@ -675,7 +682,7 @@ def check_with_singbox(link, fast_urls, real_urls, fast_timeout=REAL_CHECK_TIMEO
             logging.debug(f"Быстрые URL не открылись для {shorten_link(link)}")
             return False
 
-        # Проверка реальных сайтов – теперь только Google, но оставляем цикл на случай расширения
+        # Проверка реальных сайтов – теперь только Google
         for url in real_urls:
             try:
                 resp = requests.get(
