@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Двухуровневая проверка Vless/SS/Trojan/VMess/Hysteria2 серверов + флаги стран и города
 # Ядро: sing‑box
-# Логи: INFO – основные этапы, прогресс TLS, результаты проверок.
-# После TCP‑уникализации TLS-проверка с детальным выводом (✅/❌, прогресс).
+# Логи: INFO – основные этапы, прогресс TLS (многопоточно), результаты проверок.
+# После TCP‑уникализации TLS-проверка выполняется в 100 потоков с выводом каждого результата.
 # Подписка сортируется: Россия, Европа, остальные; внутри по TTFB.
 # Добавлена проверка TLS handshake и замер TTFB с порогом отсева.
 
@@ -74,6 +74,7 @@ SING_BOX_PATH = "sing-box"
 TCP_CHECK_TIMEOUT = 10
 TCP_MAX_WORKERS = 400
 TLS_CHECK_TIMEOUT = 5
+TLS_MAX_WORKERS = 100          # параллельность TLS-проверки
 MAX_TTFB_MS = 1000
 SOCKS_PORT = 8080
 REAL_CHECK_TIMEOUT = 15
@@ -432,6 +433,27 @@ def check_tls_handshake(ip, port, sni):
     except Exception:
         return False
 
+def check_tls_item(link, ip, latency):
+    """Выполняет TLS-проверку для одной ссылки, возвращает (ok, short_link)."""
+    parsed = parse_link(link)
+    if not parsed:
+        return False, shorten_link(link)
+    needs_tls = False
+    if parsed['protocol'] == 'trojan':
+        needs_tls = True
+    elif parsed['protocol'] == 'vless':
+        needs_tls = parsed.get('security') in ('tls', 'reality')
+    elif parsed['protocol'] == 'vmess':
+        needs_tls = parsed.get('tls', False)
+    elif parsed['protocol'] == 'hysteria2':
+        needs_tls = True
+    if needs_tls:
+        sni = parsed.get('sni', parsed['host'])
+        ok = check_tls_handshake(ip, parsed['port'], sni)
+        return ok, shorten_link(link)
+    else:
+        return True, shorten_link(link)
+
 def measure_ttfb(proxies, url):
     try:
         start = time.time()
@@ -696,38 +718,29 @@ def filter_working_links(links):
     unique_tcp = [(link, ip, latency) for (ip, port), (link, latency) in best_by_endpoint.items()]
     logging.info(f"🗂️ Уникальных (IP:порт) после TCP: {len(unique_tcp)} из {len(tcp_success)}")
 
-    # Детальная TLS-проверка с выводом прогресса
-    logging.info(f"🔒 Начинаю TLS-проверку для {len(unique_tcp)} серверов...")
+    # Многопоточная TLS-проверка с выводом прогресса
+    logging.info(f"🔒 Начинаю TLS-проверку для {len(unique_tcp)} серверов в {TLS_MAX_WORKERS} потоков...")
     tls_passed = []
     tls_total = len(unique_tcp)
-    for idx, (link, ip, latency) in enumerate(unique_tcp, 1):
-        parsed = parse_link(link)
-        if not parsed:
-            continue
-        needs_tls = False
-        if parsed['protocol'] == 'trojan':
-            needs_tls = True
-        elif parsed['protocol'] == 'vless':
-            needs_tls = parsed.get('security') in ('tls', 'reality')
-        elif parsed['protocol'] == 'vmess':
-            needs_tls = parsed.get('tls', False)
-        elif parsed['protocol'] == 'hysteria2':
-            needs_tls = True
+    with ThreadPoolExecutor(max_workers=TLS_MAX_WORKERS) as executor:
+        future_to_item = {}
+        for link, ip, latency in unique_tcp:
+            future = executor.submit(check_tls_item, link, ip, latency)
+            future_to_item[future] = (link, ip, latency)
 
-        if needs_tls:
-            sni = parsed.get('sni', parsed['host'])
-            if check_tls_handshake(ip, parsed['port'], sni):
+        completed = 0
+        for future in as_completed(future_to_item):
+            completed += 1
+            link, ip, latency = future_to_item[future]
+            ok, short = future.result()
+            if ok:
                 tls_passed.append((link, ip, latency))
                 status = "✅"
             else:
                 status = "❌"
-            logging.info(f"{status} TLS handshake [{idx}/{tls_total}]: {shorten_link(link)}")
-        else:
-            tls_passed.append((link, ip, latency))
-            # можно не логировать серверы без TLS, чтобы не засорять лог
-
-        if idx % 100 == 0:
-            logging.info(f"⏳ TLS-проверка: {idx}/{tls_total} выполнено")
+            logging.info(f"{status} TLS handshake [{completed}/{tls_total}]: {short}")
+            if completed % 100 == 0:
+                logging.info(f"⏳ TLS-проверка: {completed}/{tls_total} выполнено")
 
     logging.info(f"🔒 TLS-проверка завершена. Прошли: {len(tls_passed)}/{tls_total}")
     unique_tcp = tls_passed
