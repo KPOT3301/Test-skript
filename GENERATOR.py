@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Ультра-усиленная версия с 5-кратными TCP/TLS проверками и одной реальной проверкой на 3 сайта (Google, Telegram, YouTube)
-# Поддерживает только Россию (RU).
+# Фильтрация по геолокации отключена — проходят все серверы.
 
 import os
 import re
@@ -714,7 +714,7 @@ def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
     logging.info(f"🚀 Начинаю УЛЬТРА-УСИЛЕННУЮ проверку {total_checks} ссылок (TCP x5, TLS x5, реальная x1 на Google, Telegram, YouTube)")
-    logging.info(f"🌍 Фильтр по гео: только Россия")
+    # Убрано сообщение о фильтрации по гео
 
     # ---------- TCP раунды 1-5 ----------
     tcp_current = [(link, None, None) for link in links]  # (link, ip, latency) - пока без ip и latency
@@ -737,12 +737,12 @@ def filter_working_links(links):
     if not tcp_current:
         return []
 
-    # ---------- Геоданные и фильтр (только Россия) ----------
+    # ---------- Геоданные (без фильтрации по стране) ----------
     logging.info(f"🌍 Определение геоданных для {len(tcp_current)} серверов...")
     geo_by_link = {}
     for link, ip, latency in tcp_current:
         flag, city, country_code = get_geo_info(ip) if ip else ("", "", "")
-        if flag and country_code:
+        if flag and country_code:   # если геоданные доступны, добавляем; иначе пропускаем (можно изменить, но оставляем исходную логику)
             parsed = parse_link(link)
             geo_by_link[link] = (flag, city, country_code, parsed, latency)
 
@@ -750,15 +750,12 @@ def filter_working_links(links):
     if not geo_by_link:
         return []
 
-    # Фильтр: только Россия (RU)
-    allowed_geo = {link: data for link, data in geo_by_link.items() if data[2] == 'RU'}
-    logging.info(f"🇷🇺 Серверов России после гео: {len(allowed_geo)}")
-    if not allowed_geo:
-        return []
+    # Фильтр по гео УБРАН – используем все сервера с геоданными
+    # allowed_geo = geo_by_link   (раньше был фильтр по RU)
 
     # ---------- TLS раунды 1-5 ----------
     tls_current = []  # (link, flag, city, country_code, parsed)
-    for link, (flag, city, country_code, parsed, latency) in allowed_geo.items():
+    for link, (flag, city, country_code, parsed, latency) in geo_by_link.items():
         tls_current.append((link, flag, city, country_code, parsed))
 
     for round_num in range(1, 6):
@@ -896,7 +893,7 @@ def check_singbox_available():
 # ---------- ГЛАВНАЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск УЛЬТРА-УСИЛЕННОГО генератора подписок (TCP x5, TLS x5, реальная x1 на Google, Telegram, YouTube; фильтрация: только Россия)")
+    logging.info("🟢 Запуск УЛЬТРА-УСИЛЕННОГО генератора подписок (TCP x5, TLS x5, реальная x1 на Google, Telegram, YouTube; фильтрация по гео отключена)")
     if not check_singbox_available():
         logging.error("sing-box обязателен. Завершение.")
         return
