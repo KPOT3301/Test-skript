@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Ультра-усиленная версия с 5-кратными TCP/TLS проверками и одной реальной проверкой на 3 сайта (Google, Telegram, YouTube)
-# Геолокация через MaxMind GeoLite2 City (скачивается в папку GeoIP, обновление раз в неделю)
+# Геолокация через MaxMind GeoLite2 City (скачивается в папку GeoIP при каждом запуске)
 # Фильтр по стране отключён – все рабочие серверы попадают в подписку.
 
 import os
@@ -21,7 +21,7 @@ import shutil
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # =============================================================================
 # НАСТРОЙКИ (можно изменять)
@@ -73,7 +73,7 @@ GEOIP_DB_DIR = "GeoIP"                        # папка для хранени
 GEOIP_DB_FILENAME = "GeoLite2-City.mmdb"      # имя файла базы
 GEOIP_DB_PATH = os.path.join(GEOIP_DB_DIR, GEOIP_DB_FILENAME)
 GEOIP_DB_URL = "https://cdn.jsdelivr.net/npm/geolite2-city/GeoLite2-City.mmdb.gz"
-GEOIP_MAX_AGE_DAYS = 7   # обновлять раз в неделю
+# GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"  # альтернатива
 
 # =============================================================================
 # КОНЕЦ НАСТРОЕК
@@ -136,21 +136,19 @@ def get_next_port():
 
 # ---------- ГЕОЛОКАЦИЯ (MAXMIND) ----------
 def ensure_geoip_db():
-    """Проверяет наличие и свежесть базы GeoIP, при необходимости скачивает в папку GEOIP_DB_DIR."""
+    """Всегда скачивает свежую базу GeoIP в папку GEOIP_DB_DIR (удаляет старую)."""
     # Создаём папку, если её нет
     os.makedirs(GEOIP_DB_DIR, exist_ok=True)
 
+    # Если старый файл есть, удаляем его
     if os.path.exists(GEOIP_DB_PATH):
-        # Проверяем возраст файла
-        mtime = datetime.fromtimestamp(os.path.getmtime(GEOIP_DB_PATH))
-        if datetime.now() - mtime < timedelta(days=GEOIP_MAX_AGE_DAYS):
-            logging.info(f"🌍 База GeoIP найдена (возраст < {GEOIP_MAX_AGE_DAYS} дней)")
-            return True
-        else:
-            logging.info("🌍 База GeoIP устарела, скачиваю новую...")
-    else:
-        logging.info("🌍 База GeoIP не найдена, скачиваю...")
+        try:
+            os.remove(GEOIP_DB_PATH)
+            logging.info("🗑️ Старая база GeoIP удалена")
+        except Exception as e:
+            logging.warning(f"⚠️ Не удалось удалить старую базу: {e}")
 
+    logging.info("🌍 Скачиваю свежую базу GeoIP...")
     try:
         headers = {'User-Agent': get_random_ua()}
         resp = requests.get(GEOIP_DB_URL, timeout=30, headers=headers)
@@ -173,7 +171,7 @@ def ensure_geoip_db():
         logging.error(f"❌ Ошибка загрузки GeoIP: {e}")
         return False
 
-# Инициализация reader (отложенная, так как база может понадобиться только после проверок)
+# Инициализация reader (отложенная, но будет вызвана принудительно в main)
 reader = None
 
 def init_geoip():
@@ -862,7 +860,7 @@ def filter_working_links(links):
         return []
 
     # ---------- Геолокация для прошедших реальную проверку ----------
-    # Инициализируем GeoIP, если ещё не сделано (ленивая инициализация)
+    # (reader уже должен быть инициализирован в main, но на всякий случай проверим)
     if reader is None:
         init_geoip()
 
@@ -936,6 +934,9 @@ def main():
     if not check_singbox_available():
         logging.error("sing-box обязателен. Завершение.")
         return
+
+    # Принудительно загружаем свежую GeoIP базу (всегда скачиваем новую)
+    init_geoip()
 
     sources = read_sources()
     if not sources:
