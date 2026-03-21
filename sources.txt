@@ -1,2 +1,2 @@
-# kizyk 
-https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyaktestru.txt
+# cat
+https://raw.githubusercontent.com/VPN-cat/VPN/refs/heads/main/configs/VPN-cat
