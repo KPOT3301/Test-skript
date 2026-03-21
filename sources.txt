@@ -1,1 +1,2 @@
-
+# hard vpn
+https://raw.githubusercontent.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/refs/heads/main/vpn-lte/best_good_renamed.txt
