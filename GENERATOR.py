@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # GENERATOR.py – Ультра-усиленная версия с 5-кратными TCP/TLS проверками и одной реальной проверкой на 3 сайта (Google, Telegram, YouTube)
-# Фильтрация по геолокации отключена — проходят все серверы.
+# Геолокация через MaxMind GeoLite2 City (скачивается в папку GeoIP, обновление раз в неделю)
+# Фильтр по стране отключён – все рабочие серверы попадают в подписку.
 
 import os
 import re
@@ -15,10 +16,12 @@ import tempfile
 import sys
 import random
 import threading
+import gzip
+import shutil
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # =============================================================================
 # НАСТРОЙКИ (можно изменять)
@@ -32,23 +35,19 @@ REQUEST_TIMEOUT = 10
 SING_BOX_PATH = "./sing-box"
 
 # ---------- Настройки подписки ----------
-PROFILE_TITLE = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"                     # Изменено по вашему запросу
-SUPPORT_URL = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"                       # Изменено по вашему запросу
-PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"              # Изменено для единообразия
-PROFILE_UPDATE_INTERVAL = "1"                                # Оставлено как есть
-SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"  # Оставлено как есть
-
-# ---------- Геоданные ----------
-GEOIP_DB_PATH = "GeoLite2-City.mmdb"
-GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
+PROFILE_TITLE = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"
+SUPPORT_URL = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"
+PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"
+PROFILE_UPDATE_INTERVAL = "1"
+SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
 
 # ---------- TCP-проверка ----------
 TCP_CHECK_TIMEOUT = 10
 TCP_MAX_WORKERS = 400
-MAX_LATENCY_MS = 500
+MAX_LATENCY_MS = 250
 
 # ---------- TLS-проверка ----------
-TLS_CHECK_TIMEOUT = 2
+TLS_CHECK_TIMEOUT = 0.5
 TLS_MAX_WORKERS = 100
 
 # ---------- Реальная проверка через sing-box ----------
@@ -63,12 +62,18 @@ FAST_TEST_URLS = [
     "http://connectivitycheck.gstatic.com/generate_204",
     "http://www.gstatic.com/generate_204"
 ]
-# Три реальных сайта для проверки (Google, Telegram, YouTube)
 REAL_SITES = [
     "https://www.google.com/generate_204",
     "https://telegram.org/",
     "https://www.youtube.com/"
 ]
+
+# ---------- Геоданные (MaxMind) ----------
+GEOIP_DB_DIR = "GeoIP"                        # папка для хранения базы
+GEOIP_DB_FILENAME = "GeoLite2-City.mmdb"      # имя файла базы
+GEOIP_DB_PATH = os.path.join(GEOIP_DB_DIR, GEOIP_DB_FILENAME)
+GEOIP_DB_URL = "https://cdn.jsdelivr.net/npm/geolite2-city/GeoLite2-City.mmdb.gz"
+GEOIP_MAX_AGE_DAYS = 7   # обновлять раз в неделю
 
 # =============================================================================
 # КОНЕЦ НАСТРОЕК
@@ -118,14 +123,6 @@ USER_AGENTS = [
 def get_random_ua():
     return random.choice(USER_AGENTS)
 
-# ---------- GEOIP ----------
-try:
-    import geoip2.database
-    GEOIP_AVAILABLE = True
-except ImportError:
-    GEOIP_AVAILABLE = False
-    logging.warning("⚠️ geoip2 не установлена. Флаги стран и города не будут добавлены.")
-
 # ---------- ДИНАМИЧЕСКИЕ ПОРТЫ ----------
 _port_counter = 0
 _port_lock = threading.Lock()
@@ -137,43 +134,79 @@ def get_next_port():
         _port_counter += 1
         return port
 
-# ---------- GEOIP ЗАГРУЗКА ----------
+# ---------- ГЕОЛОКАЦИЯ (MAXMIND) ----------
 def ensure_geoip_db():
-    if not GEOIP_AVAILABLE:
-        return False
+    """Проверяет наличие и свежесть базы GeoIP, при необходимости скачивает в папку GEOIP_DB_DIR."""
+    # Создаём папку, если её нет
+    os.makedirs(GEOIP_DB_DIR, exist_ok=True)
+
     if os.path.exists(GEOIP_DB_PATH):
-        return True
-    logging.info("🌍 Скачиваю базу GeoIP (City)...")
+        # Проверяем возраст файла
+        mtime = datetime.fromtimestamp(os.path.getmtime(GEOIP_DB_PATH))
+        if datetime.now() - mtime < timedelta(days=GEOIP_MAX_AGE_DAYS):
+            logging.info(f"🌍 База GeoIP найдена (возраст < {GEOIP_MAX_AGE_DAYS} дней)")
+            return True
+        else:
+            logging.info("🌍 База GeoIP устарела, скачиваю новую...")
+    else:
+        logging.info("🌍 База GeoIP не найдена, скачиваю...")
+
     try:
-        r = requests.get(GEOIP_DB_URL, timeout=30, headers={'User-Agent': get_random_ua()})
-        r.raise_for_status()
-        with open(GEOIP_DB_PATH, 'wb') as f:
-            f.write(r.content)
-        logging.info("✅ База GeoIP (City) скачана")
+        headers = {'User-Agent': get_random_ua()}
+        resp = requests.get(GEOIP_DB_URL, timeout=30, headers=headers)
+        resp.raise_for_status()
+
+        # Сохраняем сжатый файл
+        gz_path = GEOIP_DB_PATH + ".gz"
+        with open(gz_path, 'wb') as f:
+            f.write(resp.content)
+
+        # Распаковываем
+        with gzip.open(gz_path, 'rb') as f_in:
+            with open(GEOIP_DB_PATH, 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+
+        os.remove(gz_path)
+        logging.info(f"✅ База GeoIP успешно загружена и распакована в {GEOIP_DB_PATH}")
         return True
     except Exception as e:
-        logging.error(f"❌ Ошибка скачивания GeoIP: {e}")
+        logging.error(f"❌ Ошибка загрузки GeoIP: {e}")
         return False
 
+# Инициализация reader (отложенная, так как база может понадобиться только после проверок)
 reader = None
-if ensure_geoip_db():
-    try:
-        reader = geoip2.database.Reader(GEOIP_DB_PATH)
-    except Exception as e:
-        logging.error(f"❌ Не удалось открыть базу GeoIP: {e}")
+
+def init_geoip():
+    global reader
+    if ensure_geoip_db():
+        try:
+            import geoip2.database
+            reader = geoip2.database.Reader(GEOIP_DB_PATH)
+            logging.info("✅ GeoIP reader инициализирован")
+            return True
+        except Exception as e:
+            logging.error(f"❌ Не удалось открыть базу GeoIP: {e}")
+            return False
+    else:
+        logging.warning("⚠️ GeoIP недоступен, флаги и города не будут добавлены")
+        return False
 
 def get_geo_info(ip):
-    """Возвращает (флаг, город, код страны)"""
+    """Возвращает (флаг, город, код страны) или (None, None, None) при ошибке."""
     if reader is None:
-        return "", "", ""
+        return None, None, None
     try:
         response = reader.city(ip)
         country_code = response.country.iso_code
         city = response.city.name if response.city.name else ""
-        flag = ''.join(chr(127397 + ord(c)) for c in country_code.upper()) if country_code else ""
-        return flag, city, country_code
+        if country_code:
+            # Преобразуем код страны в эмодзи флага
+            flag = ''.join(chr(127397 + ord(c)) for c in country_code.upper())
+            return flag, city, country_code
+        else:
+            return None, None, None
     except Exception:
-        return "", "", ""
+        return None, None, None
 
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ----------
 @lru_cache(maxsize=256)
@@ -714,10 +747,9 @@ def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
     logging.info(f"🚀 Начинаю УЛЬТРА-УСИЛЕННУЮ проверку {total_checks} ссылок (TCP x5, TLS x5, реальная x1 на Google, Telegram, YouTube)")
-    # Убрано сообщение о фильтрации по гео
 
     # ---------- TCP раунды 1-5 ----------
-    tcp_current = [(link, None, None) for link in links]  # (link, ip, latency) - пока без ip и latency
+    tcp_current = [(link, None, None) for link in links]  # (link, ip, latency)
     for round_num in range(1, 6):
         if not tcp_current:
             logging.info(f"📊 TCP #{round_num}: нет ссылок для проверки, завершаем.")
@@ -737,27 +769,23 @@ def filter_working_links(links):
     if not tcp_current:
         return []
 
-    # ---------- Геоданные (без фильтрации по стране) ----------
-    logging.info(f"🌍 Определение геоданных для {len(tcp_current)} серверов...")
-    geo_by_link = {}
-    for link, ip, latency in tcp_current:
-        flag, city, country_code = get_geo_info(ip) if ip else ("", "", "")
-        if flag and country_code:   # если геоданные доступны, добавляем; иначе пропускаем (можно изменить, но оставляем исходную логику)
-            parsed = parse_link(link)
-            geo_by_link[link] = (flag, city, country_code, parsed, latency)
-
-    logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
-    if not geo_by_link:
-        return []
-
-    # Фильтр по гео УБРАН – используем все сервера с геоданными
-    # allowed_geo = geo_by_link   (раньше был фильтр по RU)
+    # Сохраняем соответствие ссылка -> IP для всех прошедших TCP
+    ip_map = {link: ip for link, ip, _ in tcp_current}
 
     # ---------- TLS раунды 1-5 ----------
-    tls_current = []  # (link, flag, city, country_code, parsed)
-    for link, (flag, city, country_code, parsed, latency) in geo_by_link.items():
-        tls_current.append((link, flag, city, country_code, parsed))
+    # Сначала парсим все ссылки, прошедшие TCP
+    tls_candidates = []
+    for link, ip, latency in tcp_current:
+        parsed = parse_link(link)
+        if parsed:
+            tls_candidates.append((link, parsed))
+        else:
+            logging.debug(f"Не удалось распарсить {shorten_link(link)}, пропускаем")
 
+    if not tls_candidates:
+        return []
+
+    tls_current = tls_candidates  # (link, parsed)
     for round_num in range(1, 6):
         if not tls_current:
             logging.info(f"📊 TLS #{round_num}: нет ссылок для проверки, завершаем.")
@@ -770,23 +798,23 @@ def filter_working_links(links):
         tls_fail = 0
 
         with ThreadPoolExecutor(max_workers=TLS_MAX_WORKERS) as executor:
-            for link, flag, city, country_code, parsed in tls_current:
-                if parsed and needs_tls_check(parsed):
+            for link, parsed in tls_current:
+                if needs_tls_check(parsed):
                     host = parsed['host']
                     port = parsed['port']
                     sni = parsed.get('sni', host)
                     future = executor.submit(check_tls, host, port, sni)
-                    tls_futures[future] = (link, flag, city, country_code, parsed)
+                    tls_futures[future] = (link, parsed)
                 else:
-                    tls_next.append((link, flag, city, country_code, parsed))
+                    tls_next.append((link, parsed))
                     tls_processed += 1
                     tls_ok += 1
 
             for future in as_completed(tls_futures):
                 tls_processed += 1
-                link, flag, city, country_code, parsed = tls_futures[future]
+                link, parsed = tls_futures[future]
                 if future.result():
-                    tls_next.append((link, flag, city, country_code, parsed))
+                    tls_next.append((link, parsed))
                     tls_ok += 1
                 else:
                     tls_fail += 1
@@ -801,13 +829,13 @@ def filter_working_links(links):
 
     # ---------- Реальная проверка (один раунд, 3 сайта) ----------
     logging.info(f"🧪 Этап реальной проверки: {len(tls_current)} ссылок, быстрые URL + Google, Telegram, YouTube...")
-    real_working = []  # (link, flag, city, country_code)
+    real_working = []  # просто список ссылок
     stage_total = len(tls_current)
     stage_current = 0
     real_ok = 0
     real_fail = 0
 
-    links_to_check = [link for link, _, _, _, _ in tls_current]
+    links_to_check = [link for link, _ in tls_current]
 
     with ThreadPoolExecutor(max_workers=REAL_CHECK_CONCURRENCY) as executor:
         future_to_link = {executor.submit(lambda l: (l, check_with_singbox(l, FAST_TEST_URLS, REAL_SITES)), link): link for link in links_to_check}
@@ -818,15 +846,8 @@ def filter_working_links(links):
             link, is_working = future.result()
             short = shorten_link(link)
 
-            # Находим соответствующие флаг, город, код страны
-            flag = city = country_code = None
-            for l, f, c, cc, _ in tls_current:
-                if l == link:
-                    flag, city, country_code = f, c, cc
-                    break
-
             if is_working:
-                real_working.append((link, flag, city, country_code))
+                real_working.append(link)
                 real_ok += 1
             else:
                 real_fail += 1
@@ -837,7 +858,25 @@ def filter_working_links(links):
 
     logging.info(f"📊 Реальная проверка завершена. Прошли: {len(real_working)}/{stage_total}, OK {real_ok}, FAIL {real_fail}")
 
-    return real_working
+    if not real_working:
+        return []
+
+    # ---------- Геолокация для прошедших реальную проверку ----------
+    # Инициализируем GeoIP, если ещё не сделано (ленивая инициализация)
+    if reader is None:
+        init_geoip()
+
+    logging.info(f"🌍 Получаем геоданные для {len(real_working)} серверов...")
+    result_with_geo = []
+    for link in real_working:
+        ip = ip_map.get(link)
+        if ip:
+            flag, city, country_code = get_geo_info(ip)
+        else:
+            flag, city, country_code = None, None, None
+        result_with_geo.append((link, flag, city, country_code))
+
+    return result_with_geo
 
 # ---------- СОХРАНЕНИЕ ----------
 def save_working_links(links_with_geo):
@@ -852,11 +891,11 @@ def save_working_links(links_with_geo):
         f.write(f"#profile-update-interval:{PROFILE_UPDATE_INTERVAL}\n")
         f.write(f"#support-url:{SUPPORT_URL}\n")
         f.write(f"#profile-web-page-url:{PROFILE_WEB_PAGE_URL}\n")
-        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")  # ← строка анонса на месте
+        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
         for idx, (link, flag, city, country_code) in enumerate(links_with_geo, 1):
             link_clean = re.sub(r'#.*$', '', link)
             city_part = f" {city}" if city else ""
-            country_flag = flag if flag else country_code
+            country_flag = flag if flag else (country_code if country_code else "")
             tag = f"#🔑📱ТОННЕЛЬ {idx:04d} | {country_flag}{city_part} |"
             f.write(link_clean + tag + '\n')
 
@@ -893,7 +932,7 @@ def check_singbox_available():
 # ---------- ГЛАВНАЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск УЛЬТРА-УСИЛЕННОГО генератора подписок (TCP x5, TLS x5, реальная x1 на Google, Telegram, YouTube; фильтрация по гео отключена)")
+    logging.info("🟢 Запуск УЛЬТРА-УСИЛЕННОГО генератора подписок (TCP x5, TLS x5, реальная x1 на Google, Telegram, YouTube)")
     if not check_singbox_available():
         logging.error("sing-box обязателен. Завершение.")
         return
@@ -916,9 +955,9 @@ def main():
     if written > 0:
         create_base64_subscription()
     else:
-        logging.warning("Нет серверов с флагами – Base64 не создана.")
+        logging.warning("Нет рабочих серверов – Base64 не создана.")
 
-    logging.info(f"📊 Итог: {len(working_links_with_geo)} рабочих с флагами из {len(all_links)} проверенных")
+    logging.info(f"📊 Итог: {len(working_links_with_geo)} рабочих из {len(all_links)} проверенных")
     logging.info("🏁 Работа завершена")
 
 if __name__ == "__main__":
