@@ -45,10 +45,10 @@ GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/G
 # ---------- TCP-проверка ----------
 TCP_CHECK_TIMEOUT = 10
 TCP_MAX_WORKERS = 400
-MAX_LATENCY_MS = 250
+MAX_LATENCY_MS = 500
 
 # ---------- TLS-проверка ----------
-TLS_CHECK_TIMEOUT = 0.5
+TLS_CHECK_TIMEOUT = 2
 TLS_MAX_WORKERS = 100
 
 # ---------- Реальная проверка через sing-box ----------
