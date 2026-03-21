@@ -1,2 +1,1 @@
-# cat
-https://raw.githubusercontent.com/VPN-cat/VPN/refs/heads/main/configs/VPN-cat
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_part1.txt
