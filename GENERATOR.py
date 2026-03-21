@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# GENERATOR.py – Упрощённая версия: TLS рукопожатие 3 раза + реальная проверка на Google.
-# Геофильтрация удалена.
+# GENERATOR.py – Ультра-усиленная версия с 5-кратными TCP/TLS проверками и одной реальной проверкой на 3 сайта (Google, Telegram, YouTube)
+# Поддерживает только Россию (RU).
 
 import os
 import re
@@ -32,20 +32,24 @@ REQUEST_TIMEOUT = 10
 SING_BOX_PATH = "./sing-box"
 
 # ---------- Настройки подписки ----------
-PROFILE_TITLE = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"
-SUPPORT_URL = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"
-PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"
-PROFILE_UPDATE_INTERVAL = "1"
-SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"
+PROFILE_TITLE = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"                     # Изменено по вашему запросу
+SUPPORT_URL = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"                       # Изменено по вашему запросу
+PROFILE_WEB_PAGE_URL = "🇷🇺КРОТовые ТОННЕЛИ🇷🇺"              # Изменено для единообразия
+PROFILE_UPDATE_INTERVAL = "1"                                # Оставлено как есть
+SUBSCRIPTION_USERINFO = "upload=0; download=0; total=0; expire=0"  # Оставлено как есть
 
 # ---------- Геоданные ----------
 GEOIP_DB_PATH = "GeoLite2-City.mmdb"
 GEOIP_DB_URL = "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"
 
+# ---------- TCP-проверка ----------
+TCP_CHECK_TIMEOUT = 10
+TCP_MAX_WORKERS = 400
+MAX_LATENCY_MS = 250
+
 # ---------- TLS-проверка ----------
-TLS_CHECK_TIMEOUT = 2
+TLS_CHECK_TIMEOUT = 0.5
 TLS_MAX_WORKERS = 100
-TLS_ROUNDS = 3                     # 3 последовательные проверки TLS
 
 # ---------- Реальная проверка через sing-box ----------
 SOCKS_BASE_PORT = 10000
@@ -59,7 +63,12 @@ FAST_TEST_URLS = [
     "http://connectivitycheck.gstatic.com/generate_204",
     "http://www.gstatic.com/generate_204"
 ]
-REAL_URL = "https://www.google.com/generate_204"   # Основная проверка
+# Три реальных сайта для проверки (Google, Telegram, YouTube)
+REAL_SITES = [
+    "https://www.google.com/generate_204",
+    "https://telegram.org/",
+    "https://www.youtube.com/"
+]
 
 # =============================================================================
 # КОНЕЦ НАСТРОЕК
@@ -169,7 +178,6 @@ def get_geo_info(ip):
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ----------
 @lru_cache(maxsize=256)
 def resolve_host(host):
-    """Возвращает IP-адрес хоста (кэшируется)"""
     return socket.gethostbyname(host)
 
 def read_sources():
@@ -596,12 +604,30 @@ def create_singbox_config(config, socks_port):
     }
     return full_config
 
+# ---------- TCP ПРОВЕРКА ----------
+def check_tcp(link):
+    parsed = parse_link(link)
+    if not parsed:
+        return (link, False, None, None)
+    host, port = parsed['host'], parsed['port']
+    try:
+        ip = resolve_host(host)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(TCP_CHECK_TIMEOUT)
+        start = time.time()
+        result = sock.connect_ex((ip, port))
+        latency_ms = int((time.time() - start) * 1000) if result == 0 else None
+        sock.close()
+        return (link, result == 0, ip if result == 0 else None, latency_ms)
+    except:
+        return (link, False, None, None)
+
 # ---------- УНИВЕРСАЛЬНАЯ ПРОВЕРКА ЧЕРЕЗ SING-BOX ----------
-def check_with_singbox(link, fast_urls, real_url):
+def check_with_singbox(link, fast_urls, real_urls, fast_timeout=REAL_CHECK_TIMEOUT, real_timeout=REAL_CHECK_TIMEOUT):
     config_dict = parse_link(link)
     if not config_dict:
         return False
-
+    
     socks_port = get_next_port()
     sb_config = create_singbox_config(config_dict, socks_port)
     if not sb_config:
@@ -642,7 +668,7 @@ def check_with_singbox(link, fast_urls, real_url):
         for url in fast_urls:
             try:
                 resp = requests.get(
-                    url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
+                    url, proxies=proxies, timeout=fast_timeout,
                     headers={'User-Agent': get_random_ua()}, allow_redirects=False, verify=False
                 )
                 if resp.status_code in (200, 204):
@@ -654,18 +680,19 @@ def check_with_singbox(link, fast_urls, real_url):
             logging.debug(f"Быстрые URL не открылись для {shorten_link(link)}")
             return False
 
-        # Проверка реального сайта (Google)
-        try:
-            resp = requests.get(
-                real_url, proxies=proxies, timeout=REAL_CHECK_TIMEOUT,
-                headers={'User-Agent': get_random_ua()}, allow_redirects=True, verify=False
-            )
-            if resp.status_code not in (200, 204):
-                logging.debug(f"Google вернул код {resp.status_code} для {shorten_link(link)}")
+        # Проверка реальных сайтов (все должны быть доступны, следуем редиректам)
+        for url in real_urls:
+            try:
+                resp = requests.get(
+                    url, proxies=proxies, timeout=real_timeout,
+                    headers={'User-Agent': get_random_ua()}, allow_redirects=True, verify=False
+                )
+                if resp.status_code not in (200, 204):
+                    logging.debug(f"Реальный сайт {url} вернул код {resp.status_code} для {shorten_link(link)}")
+                    return False
+            except Exception as e:
+                logging.debug(f"Ошибка при запросе реального сайта {url} для {shorten_link(link)}: {e}")
                 return False
-        except Exception as e:
-            logging.debug(f"Ошибка при запросе Google для {shorten_link(link)}: {e}")
-            return False
 
         return True
 
@@ -682,59 +709,91 @@ def check_with_singbox(link, fast_urls, real_url):
         if os.path.exists(config_path):
             os.unlink(config_path)
 
-# ---------- ФИЛЬТРАЦИЯ (3 раунда TLS + реальная проверка на Google, геофильтрация удалена) ----------
+# ---------- ФИЛЬТРАЦИЯ (УЛЬТРА-УСИЛЕННАЯ, 5xTCP, 5xTLS, 1xРеальная на 3 сайта) ----------
 def filter_working_links(links):
     global record_counter, current_check, total_checks
     total_checks = len(links)
-    logging.info(f"🚀 Начинаю проверку {total_checks} ссылок (TLS x{TLS_ROUNDS} + реальная проверка на Google)")
+    logging.info(f"🚀 Начинаю УЛЬТРА-УСИЛЕННУЮ проверку {total_checks} ссылок (TCP x5, TLS x5, реальная x1 на Google, Telegram, YouTube)")
+    logging.info(f"🌍 Фильтр по гео: только Россия")
 
-    # ---------- Парсим все ссылки сразу ----------
-    parsed_links = []
-    for link in links:
-        parsed = parse_link(link)
-        if parsed:
-            parsed_links.append((link, parsed))
-    logging.info(f"🔍 Успешно распарсено {len(parsed_links)}/{len(links)} ссылок")
+    # ---------- TCP раунды 1-5 ----------
+    tcp_current = [(link, None, None) for link in links]  # (link, ip, latency) - пока без ip и latency
+    for round_num in range(1, 6):
+        if not tcp_current:
+            logging.info(f"📊 TCP #{round_num}: нет ссылок для проверки, завершаем.")
+            return []
+        logging.info(f"🌐 Этап TCP #{round_num}: проверка {len(tcp_current)} ссылок...")
+        tcp_next = []
+        with ThreadPoolExecutor(max_workers=TCP_MAX_WORKERS) as executor:
+            future_to_link = {executor.submit(check_tcp, link): link for link, _, _ in tcp_current}
+            for future in as_completed(future_to_link):
+                current_check += 1
+                link, ok, ip, latency = future.result()
+                if ok and ip and latency is not None and latency <= MAX_LATENCY_MS:
+                    tcp_next.append((link, ip, latency))
+        logging.info(f"📊 TCP #{round_num} завершена. Прошли (latency <= {MAX_LATENCY_MS} мс): {len(tcp_next)}/{len(tcp_current)}")
+        tcp_current = tcp_next
 
-    if not parsed_links:
+    if not tcp_current:
         return []
 
-    # ---------- TLS раунды (TLS_ROUNDS раз) ----------
-    tls_current = parsed_links[:]   # (link, parsed)
-    for round_num in range(1, TLS_ROUNDS + 1):
+    # ---------- Геоданные и фильтр (только Россия) ----------
+    logging.info(f"🌍 Определение геоданных для {len(tcp_current)} серверов...")
+    geo_by_link = {}
+    for link, ip, latency in tcp_current:
+        flag, city, country_code = get_geo_info(ip) if ip else ("", "", "")
+        if flag and country_code:
+            parsed = parse_link(link)
+            geo_by_link[link] = (flag, city, country_code, parsed, latency)
+
+    logging.info(f"🧾 Серверов с флагами: {len(geo_by_link)}")
+    if not geo_by_link:
+        return []
+
+    # Фильтр: только Россия (RU)
+    allowed_geo = {link: data for link, data in geo_by_link.items() if data[2] == 'RU'}
+    logging.info(f"🇷🇺 Серверов России после гео: {len(allowed_geo)}")
+    if not allowed_geo:
+        return []
+
+    # ---------- TLS раунды 1-5 ----------
+    tls_current = []  # (link, flag, city, country_code, parsed)
+    for link, (flag, city, country_code, parsed, latency) in allowed_geo.items():
+        tls_current.append((link, flag, city, country_code, parsed))
+
+    for round_num in range(1, 6):
         if not tls_current:
             logging.info(f"📊 TLS #{round_num}: нет ссылок для проверки, завершаем.")
             return []
         logging.info(f"🔒 Этап TLS #{round_num}: проверка {len(tls_current)} ссылок...")
         tls_next = []
+        tls_futures = {}
         tls_processed = 0
         tls_ok = 0
         tls_fail = 0
 
         with ThreadPoolExecutor(max_workers=TLS_MAX_WORKERS) as executor:
-            future_to_link = {}
-            for link, parsed in tls_current:
-                if needs_tls_check(parsed):
+            for link, flag, city, country_code, parsed in tls_current:
+                if parsed and needs_tls_check(parsed):
                     host = parsed['host']
                     port = parsed['port']
                     sni = parsed.get('sni', host)
                     future = executor.submit(check_tls, host, port, sni)
-                    future_to_link[future] = (link, parsed)
+                    tls_futures[future] = (link, flag, city, country_code, parsed)
                 else:
-                    # Протоколы без TLS (например, SS) пропускаем проверку, но считаем успешными
-                    tls_next.append((link, parsed))
+                    tls_next.append((link, flag, city, country_code, parsed))
                     tls_processed += 1
                     tls_ok += 1
 
-            for future in as_completed(future_to_link):
+            for future in as_completed(tls_futures):
                 tls_processed += 1
-                link, parsed = future_to_link[future]
+                link, flag, city, country_code, parsed = tls_futures[future]
                 if future.result():
-                    tls_next.append((link, parsed))
+                    tls_next.append((link, flag, city, country_code, parsed))
                     tls_ok += 1
                 else:
                     tls_fail += 1
-                if tls_processed % 50 == 0:
+                if tls_processed % 10 == 0:
                     logging.info(f"TLS #{round_num} прогресс: обработано {tls_processed}, OK {tls_ok}, FAIL {tls_fail}")
 
         logging.info(f"✅ TLS #{round_num} завершена. OK {tls_ok}, FAIL {tls_fail}, всего {tls_processed}")
@@ -743,35 +802,18 @@ def filter_working_links(links):
     if not tls_current:
         return []
 
-    # ---------- Сбор геоданных (без фильтрации по стране) ----------
-    logging.info(f"🌍 Определение геоданных для {len(tls_current)} серверов...")
-    geo_info = {}
-    for link, parsed in tls_current:
-        host = parsed['host']
-        try:
-            ip = resolve_host(host)
-            flag, city, country_code = get_geo_info(ip)
-        except Exception:
-            flag, city, country_code = "", "", ""
-        geo_info[link] = (flag, city, country_code)
-
-    # ---------- Реальная проверка (один раунд, Google) ----------
-    logging.info(f"🧪 Этап реальной проверки: {len(tls_current)} ссылок, быстрые URL + Google...")
-    working_links = []  # просто список ссылок, прошедших реальную проверку
+    # ---------- Реальная проверка (один раунд, 3 сайта) ----------
+    logging.info(f"🧪 Этап реальной проверки: {len(tls_current)} ссылок, быстрые URL + Google, Telegram, YouTube...")
+    real_working = []  # (link, flag, city, country_code)
     stage_total = len(tls_current)
     stage_current = 0
     real_ok = 0
     real_fail = 0
 
-    links_to_check = [link for link, _ in tls_current]
-
-    # Вспомогательная функция для проверки одной ссылки
-    def check_link(link):
-        return link, check_with_singbox(link, FAST_TEST_URLS, REAL_URL)
+    links_to_check = [link for link, _, _, _, _ in tls_current]
 
     with ThreadPoolExecutor(max_workers=REAL_CHECK_CONCURRENCY) as executor:
-        future_to_link = {executor.submit(check_link, l): l for l in links_to_check}
-
+        future_to_link = {executor.submit(lambda l: (l, check_with_singbox(l, FAST_TEST_URLS, REAL_SITES)), link): link for link in links_to_check}
         for future in as_completed(future_to_link):
             stage_current += 1
             current_check += 1
@@ -779,8 +821,15 @@ def filter_working_links(links):
             link, is_working = future.result()
             short = shorten_link(link)
 
+            # Находим соответствующие флаг, город, код страны
+            flag = city = country_code = None
+            for l, f, c, cc, _ in tls_current:
+                if l == link:
+                    flag, city, country_code = f, c, cc
+                    break
+
             if is_working:
-                working_links.append(link)
+                real_working.append((link, flag, city, country_code))
                 real_ok += 1
             else:
                 real_fail += 1
@@ -789,15 +838,9 @@ def filter_working_links(links):
                 log_msg = f"Реальная проверка прогресс: {stage_current}/{stage_total}, OK {real_ok}, FAIL {real_fail}"
                 logging.info(log_msg)
 
-    logging.info(f"📊 Реальная проверка завершена. Прошли: {len(working_links)}/{stage_total}, OK {real_ok}, FAIL {real_fail}")
+    logging.info(f"📊 Реальная проверка завершена. Прошли: {len(real_working)}/{stage_total}, OK {real_ok}, FAIL {real_fail}")
 
-    # Формируем итоговый список с геоданными
-    working_with_geo = []
-    for link in working_links:
-        flag, city, country_code = geo_info.get(link, ("", "", ""))
-        working_with_geo.append((link, flag, city, country_code))
-
-    return working_with_geo
+    return real_working
 
 # ---------- СОХРАНЕНИЕ ----------
 def save_working_links(links_with_geo):
@@ -812,7 +855,7 @@ def save_working_links(links_with_geo):
         f.write(f"#profile-update-interval:{PROFILE_UPDATE_INTERVAL}\n")
         f.write(f"#support-url:{SUPPORT_URL}\n")
         f.write(f"#profile-web-page-url:{PROFILE_WEB_PAGE_URL}\n")
-        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")
+        f.write(f"#announce: АКТИВНЫХ ТОННЕЛЕЙ 🚀 {len(links_with_geo)} | ОБНОВЛЕНО 📅 {TODAY_STR}\n")  # ← строка анонса на месте
         for idx, (link, flag, city, country_code) in enumerate(links_with_geo, 1):
             link_clean = re.sub(r'#.*$', '', link)
             city_part = f" {city}" if city else ""
@@ -853,7 +896,7 @@ def check_singbox_available():
 # ---------- ГЛАВНАЯ ----------
 def main():
     global record_counter, current_check, total_checks
-    logging.info("🟢 Запуск генератора подписок (TLS x3 + реальная проверка на Google; геофильтрация удалена)")
+    logging.info("🟢 Запуск УЛЬТРА-УСИЛЕННОГО генератора подписок (TCP x5, TLS x5, реальная x1 на Google, Telegram, YouTube; фильтрация: только Россия)")
     if not check_singbox_available():
         logging.error("sing-box обязателен. Завершение.")
         return
