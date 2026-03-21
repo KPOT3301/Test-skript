@@ -763,11 +763,15 @@ def filter_working_links(links):
     real_ok = 0
     real_fail = 0
 
-    # Список ссылок для проверки
     links_to_check = [link for link, _ in tls_current]
 
+    # Вспомогательная функция для проверки одной ссылки
+    def check_link(link):
+        return link, check_with_singbox(link, FAST_TEST_URLS, REAL_URL)
+
     with ThreadPoolExecutor(max_workers=REAL_CHECK_CONCURRENCY) as executor:
-        future_to_link = {executor.submit(lambda l: (l, check_with_singbox(l, FAST_TEST_URLS, REAL_URL))): l for l in links_to_check}
+        future_to_link = {executor.submit(check_link, l): l for l in links_to_check}
+
         for future in as_completed(future_to_link):
             stage_current += 1
             current_check += 1
